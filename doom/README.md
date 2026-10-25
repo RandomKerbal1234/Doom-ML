@@ -12,6 +12,14 @@ For development, you can also run it with `cargo run --release`.
 
 The game opens on a paused controls and level-selection screen. Use **Up / Down** to choose a level and **Enter** to start there. Press **Q** to quickplay from the first level and progress through the campaign. Press **F1** (or **Fn+F1** on keyboards that send F1 through the Fn key) during play to pause and reopen the screen.
 
+## Machine learning trainer
+
+From the repository root, build the game and its headless training executable
+with `./exec_mgmt.sh -b`, then start training with
+`python3 training/train.py`. Adjust tester count, evolution settings, fitness,
+and output paths in the root `config.json`. See [`training/README.md`](../training/README.md)
+for the environment interface and configuration details.
+
 ## Controls
 
 - **W / S**: move forward and backward

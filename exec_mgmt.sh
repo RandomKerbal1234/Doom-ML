@@ -40,7 +40,7 @@ executable="target/release/doom" # Remember that this script is running in Doom-
 
 
 if "$build"; then
-	cargo build -r
+	cargo build -r --bins
 fi
 
 if "$run"; then

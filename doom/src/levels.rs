@@ -17,6 +17,20 @@ pub(crate) enum PickupKind {
     Ammo,
 }
 
+impl PickupKind {
+    #[allow(dead_code)] // Used by the headless training observation encoder.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Shotgun => "shotgun",
+            Self::Chaingun => "chaingun",
+            Self::RocketLauncher => "rocket_launcher",
+            Self::Medkit => "medkit",
+            Self::Armor => "armor",
+            Self::Ammo => "ammo",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct PickupDef {
     pub(crate) x: f32,

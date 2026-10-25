@@ -190,6 +190,139 @@ impl Game {
         self.load_level(first_level);
     }
 
+    /// Starts a fresh headless training episode at the requested level.
+    #[allow(dead_code)] // Used by the separate headless training binary.
+    pub(crate) fn agent_start(&mut self, first_level: usize, preset: &str) {
+        let preset = match preset {
+            "easy" => DifficultyPreset::Easy,
+            "hard" => DifficultyPreset::Hard,
+            _ => DifficultyPreset::Medium,
+        };
+        self.settings = GameSettings::preset(preset);
+        self.difficulty = preset;
+        self.start_new_run(first_level % levels().len());
+    }
+
+    /// Applies one normalized agent action and advances the actual game simulation.
+    /// turn/forward/strafe are in [-1, 1]; dt is bounded by the caller.
+    #[allow(dead_code)] // Used by the separate headless training binary.
+    pub(crate) fn agent_step(
+        &mut self,
+        turn: f32,
+        forward: f32,
+        strafe: f32,
+        fire: bool,
+        activate_exit: bool,
+        weapon: usize,
+        run: bool,
+        dt: f32,
+    ) {
+        if self.dead || self.won || self.paused || self.settings_open {
+            return;
+        }
+        let dt = dt.clamp(0.0, 0.05);
+        if weapon < self.unlocked.len() && self.unlocked[weapon] {
+            self.weapon = weapon;
+        }
+        let turn_speed = if run {
+            self.settings.run_turn_speed
+        } else {
+            self.settings.turn_speed
+        };
+        self.angle = (self.angle + turn.clamp(-1.0, 1.0) * turn_speed * dt)
+            .rem_euclid(std::f32::consts::TAU);
+        let forward = forward.clamp(-1.0, 1.0);
+        let strafe = strafe.clamp(-1.0, 1.0);
+        let mut vx = self.angle.cos() * forward - self.angle.sin() * strafe;
+        let mut vy = self.angle.sin() * forward + self.angle.cos() * strafe;
+        let magnitude = (vx * vx + vy * vy).sqrt();
+        if magnitude > 1.0 {
+            vx /= magnitude;
+            vy /= magnitude;
+        }
+        let speed = if run {
+            self.settings.run_speed
+        } else {
+            self.settings.walk_speed
+        };
+        let (self_x, self_y) = self.try_move(self.x + vx * speed * dt, self.y + vy * speed * dt);
+        self.x = self_x;
+        self.y = self_y;
+
+        if activate_exit {
+            let exit = self.current_level().exit;
+            if distance(self.x, self.y, exit.0, exit.1) < 1.35 {
+                self.load_level((self.level_index + 1) % levels().len());
+            }
+        }
+        if fire && self.shot_timer <= 0.0 {
+            self.fire();
+        }
+        self.update(dt);
+    }
+
+    #[allow(dead_code)] // Used by the separate headless training binary.
+    pub(crate) fn agent_observation(&self) -> String {
+        let level = self.current_level();
+        let enemies = self
+            .enemies
+            .iter()
+            .filter(|e| e.alive)
+            .map(|e| {
+                format!(
+                    "{{\"x\":{:.3},\"y\":{:.3},\"hp\":{:.2},\"kind\":{}}}",
+                    e.x, e.y, e.hp, e.kind
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let pickups = self
+            .pickups
+            .iter()
+            .filter(|p| p.active)
+            .map(|p| {
+                format!(
+                    "{{\"x\":{:.3},\"y\":{:.3},\"kind\":\"{}\"}}",
+                    p.x,
+                    p.y,
+                    p.kind.label()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let map = level
+            .map
+            .iter()
+            .map(|r| format!("\"{}\"", r))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{{\"level\":{},\"x\":{:.3},\"y\":{:.3},\"angle\":{:.4},\"health\":{},\"armor\":{},\"ammo\":[{},{},{},{}],\"unlocked\":[{},{},{},{}],\"weapon\":{},\"time\":{:.3},\"dead\":{},\"exit\":[{:.3},{:.3}],\"map\":[{}],\"enemies\":[{}],\"pickups\":[{}]}}",
+            self.level_index,
+            self.x,
+            self.y,
+            self.angle,
+            self.health,
+            self.armor,
+            self.ammo[0],
+            self.ammo[1],
+            self.ammo[2],
+            self.ammo[3],
+            self.unlocked[0],
+            self.unlocked[1],
+            self.unlocked[2],
+            self.unlocked[3],
+            self.weapon,
+            self.time,
+            self.dead,
+            level.exit.0,
+            level.exit.1,
+            map,
+            enemies,
+            pickups
+        )
+    }
+
     fn toggle_settings(&mut self) {
         if self.settings_open {
             self.settings_open = false;

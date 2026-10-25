@@ -323,6 +323,134 @@ impl Game {
         )
     }
 
+    /// Computes the same normalized 42-value input vector used by training/env.py.
+    pub(crate) fn agent_policy_action(
+        &self,
+        weights: &[f32],
+    ) -> (f32, f32, f32, bool, bool, usize, bool) {
+        const INPUTS: usize = 42;
+        const OUTPUTS: usize = 10;
+        let width = INPUTS + 1;
+        if weights.len() != OUTPUTS * width {
+            return (0.0, 0.0, 0.0, false, false, 0, true);
+        }
+        let mut values = Vec::with_capacity(INPUTS);
+        for ray in 0..8 {
+            let direction = self.angle + ray as f32 * std::f32::consts::TAU / 8.0;
+            let mut distance = 0.0;
+            for k in 1..=80 {
+                distance = k as f32 * 0.1;
+                let sx = (self.x + direction.cos() * distance) as i32;
+                let sy = (self.y + direction.sin() * distance) as i32;
+                if self.is_wall(sx, sy) || sx < 0 || sy < 0 || sx >= 16 || sy >= 12 {
+                    break;
+                }
+            }
+            values.push((distance / 8.0).min(1.0));
+        }
+
+        let mut enemies = self
+            .enemies
+            .iter()
+            .filter(|enemy| enemy.alive)
+            .collect::<Vec<_>>();
+        enemies.sort_by(|a, b| {
+            distance(self.x, self.y, a.x, a.y)
+                .partial_cmp(&distance(self.x, self.y, b.x, b.y))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for i in 0..2 {
+            if let Some(enemy) = enemies.get(i) {
+                let dx = enemy.x - self.x;
+                let dy = enemy.y - self.y;
+                let bearing = dy.atan2(dx) - self.angle;
+                values.extend([
+                    bearing.sin(),
+                    bearing.cos(),
+                    (distance(self.x, self.y, enemy.x, enemy.y) / 12.0).min(1.0),
+                    (enemy.hp / 200.0).min(1.0),
+                    enemy.kind as f32,
+                ]);
+            } else {
+                values.extend([0.0, 0.0, 1.0, 0.0, 0.0]);
+            }
+        }
+
+        if let Some(pickup) = self
+            .pickups
+            .iter()
+            .filter(|pickup| pickup.active)
+            .min_by(|a, b| {
+                distance(self.x, self.y, a.x, a.y)
+                    .partial_cmp(&distance(self.x, self.y, b.x, b.y))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        {
+            let dx = pickup.x - self.x;
+            let dy = pickup.y - self.y;
+            let bearing = dy.atan2(dx) - self.angle;
+            values.extend([
+                bearing.sin(),
+                bearing.cos(),
+                (distance(self.x, self.y, pickup.x, pickup.y) / 12.0).min(1.0),
+            ]);
+            for kind in [
+                "shotgun",
+                "chaingun",
+                "rocket_launcher",
+                "medkit",
+                "armor",
+                "ammo",
+            ] {
+                values.push((pickup.kind.label() == kind) as u8 as f32);
+            }
+        } else {
+            values.extend([0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        }
+
+        let exit = self.current_level().exit;
+        let dx = exit.0 - self.x;
+        let dy = exit.1 - self.y;
+        let bearing = dy.atan2(dx) - self.angle;
+        values.extend([
+            bearing.sin(),
+            bearing.cos(),
+            (distance(self.x, self.y, exit.0, exit.1) / 16.0).min(1.0),
+            self.health as f32 / 200.0,
+            self.armor as f32 / 200.0,
+        ]);
+        values.extend(self.ammo.map(|ammo| (ammo.max(0) as f32 / 100.0).min(1.0)));
+        values.extend(self.unlocked.map(|unlocked| unlocked as u8 as f32));
+        values.extend([self.weapon as f32 / 3.0, (self.time / 120.0).min(1.0)]);
+
+        let mut output = [0.0f32; OUTPUTS];
+        for (out, value) in output.iter_mut().enumerate() {
+            let start = out * width;
+            let mut sum = weights[start + INPUTS];
+            for (i, input) in values.iter().enumerate() {
+                sum += weights[start + i] * input;
+            }
+            *value = sum.tanh();
+        }
+        let mut weapon = (0..4)
+            .find(|&candidate| self.unlocked[candidate])
+            .unwrap_or(0);
+        for candidate in 0..4 {
+            if self.unlocked[candidate] && output[5 + candidate] > output[5 + weapon] {
+                weapon = candidate;
+            }
+        }
+        (
+            output[0],
+            output[1],
+            output[2],
+            output[3] > 0.0,
+            output[4] > 0.0,
+            weapon,
+            output[9] > 0.0,
+        )
+    }
+
     fn toggle_settings(&mut self) {
         if self.settings_open {
             self.settings_open = false;

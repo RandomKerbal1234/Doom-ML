@@ -139,6 +139,7 @@ def main():
             (output / cfg["best_policy_file"]).write_text(json.dumps({
                 "architecture": {"inputs": 42, "outputs": 10, "activation": "tanh-linear"},
                 "generation": generation,
+                "doom_difficulty": cfg["doom_difficulty"],
                 "result": best,
                 "weights": best_genome,
             }))

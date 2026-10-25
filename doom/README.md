@@ -19,6 +19,8 @@ with `./exec_mgmt.sh -b`, then start training with
 `python3 training/train.py`. Adjust tester count, evolution settings, fitness,
 and output paths in the root `config.json`. See [`training/README.md`](../training/README.md)
 for the environment interface and configuration details.
+While training runs, launch `./watch_agent.sh` from the repository root to
+watch the current best saved policy in the game window.
 
 ## Controls
 

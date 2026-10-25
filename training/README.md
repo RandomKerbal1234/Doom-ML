@@ -20,6 +20,12 @@ Or build automatically before training with `python3 training/train.py --build`.
 Use `--config path/to/config.json` to select another configuration. A short
 smoke training can be run with `--generations 1`.
 
+While training is running, open a second terminal and run
+`./watch_agent.sh`. It opens the DOOM GUI and follows the policy in
+`training/output/best_policy.json`, reloading it when a new generation is saved.
+Press **R** to restart with a random starting level or **Q** to close the viewer.
+To watch another policy file, pass its path to the script.
+
 ## Configuration
 
 Edit the root `config.json`. `cpu_threads` controls parallel testers: `0` uses

@@ -1,6 +1,6 @@
 {
   "cpu_threads": 0,
-  "generations": 10000,
+  "generations": 100,
   "population_size": 32,
   "elite_count": 4,
   "parent_pool_size": 12,

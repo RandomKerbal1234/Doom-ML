@@ -133,41 +133,16 @@ def evaluate(weights, executable: Path, cfg, seed: int):
     import random
     rng = random.Random(seed)
     start_level = rng.randrange(cfg["campaign_levels"])
-    level_count = 0
-    level_kills = 0
-    total_kills = 0
-    total_time = 0.0
-    level_start_time = 0.0
-    score = 0.0
-    steps = 0
-    with HeadlessDoomEnv(executable, cfg["time_step_seconds"], cfg["doom_difficulty"]) as env:
-        obs = env.reset(start_level)
-        while steps < cfg["max_steps"]:
-            before = len(obs["enemies"])
-            action = choose_action(weights, obs)
-            previous_level = obs["level"]
-            obs, done = env.step(action)
-            killed = max(0, before - len(obs["enemies"])) if obs["level"] == previous_level else 0
-            level_kills += killed
-            total_kills += killed
-            steps += 1
-            total_time += cfg["time_step_seconds"]
-            if obs["level"] != previous_level:
-                level_count += 1
-                # Completed level bonus, surviving health, kills, and elapsed time.
-                score += cfg["fitness"]["level_completion"]
-                score += obs["health"] * cfg["fitness"]["health_per_point"]
-                score += level_kills * cfg["fitness"]["kill"]
-                score -= (total_time - level_start_time) * cfg["fitness"]["seconds"]
-                level_kills = 0
-                level_start_time = total_time
-            if done:
-                break
-    # Shape incomplete runs by progress and the score from their current level.
-    if level_count < 10:
-        score += level_count * cfg["fitness"]["partial_level"]
-        score += obs["health"] * cfg["fitness"]["health_per_point"]
-        score += level_kills * cfg["fitness"]["kill"]
-        score -= (total_time - level_start_time) * cfg["fitness"]["seconds"]
-    return {"fitness": score, "levels": level_count, "kills": total_kills,
-            "health": obs["health"], "seconds": round(total_time, 2), "start_level": start_level}
+    fitness = cfg["fitness"]
+    command = [
+        str(executable), "--evaluate", str(start_level), cfg["doom_difficulty"],
+        str(cfg["time_step_seconds"]), str(cfg["max_steps"]),
+        str(fitness["level_completion"]), str(fitness["partial_level"]),
+        str(fitness["health_per_point"]), str(fitness["kill"]), str(fitness["seconds"]),
+    ]
+    result = subprocess.run(command, input=",".join(map(str, weights)), text=True,
+                            capture_output=True, check=True)
+    score, levels, kills, health, seconds, returned_start_level = result.stdout.strip().split(",")
+    return {"fitness": float(score), "levels": int(levels), "kills": int(kills),
+            "health": int(health), "seconds": float(seconds),
+            "start_level": int(returned_start_level)}

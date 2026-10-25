@@ -28,9 +28,13 @@ To watch another policy file, pass its path to the script.
 
 ## Configuration
 
-Edit the root `config.json`. `cpu_threads` controls parallel testers: `0` uses
-all detected CPUs, `-1` uses all but one, and a positive integer selects that
-many concurrent tester processes. Other settings control population and mutation,
+Edit the root `config.json`. `cpu_threads` controls parallel episode evaluations:
+`0` uses all detected CPUs, `-1` uses all but one, and a positive integer selects
+that many concurrent evaluations. Each episode now runs its policy loop inside
+the Rust headless executable, avoiding a Python/Rust JSON exchange on every
+simulation step. Episodes are scheduled independently so a population with
+multiple evaluation episodes can use more workers than there are candidates.
+Other settings control population and mutation,
 simulation step size, run length, evaluation episodes, seed, reward weights, checkpointing, and
 output paths. `doom_difficulty` selects Easy, Medium, or Hard game settings.
 Training begins with random policies when no checkpoint exists;

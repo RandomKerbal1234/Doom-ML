@@ -20,7 +20,12 @@ PARAMETERS = 10 * (42 + 1)
 
 
 def tester_count(value):
-    available = os.cpu_count() or 1
+    if hasattr(os, "process_cpu_count"):
+        available = os.process_cpu_count() or 1
+    elif hasattr(os, "sched_getaffinity"):
+        available = len(os.sched_getaffinity(0)) or 1
+    else:
+        available = os.cpu_count() or 1
     if value == 0:
         return available
     if value == -1:
@@ -39,21 +44,20 @@ def mutate(parent, cfg, rng):
     return child
 
 
-def evaluate_candidate(genome, executable, cfg, seeds):
-    runs = [evaluate(genome, executable, cfg, seed) for seed in seeds]
-    return {
-        "fitness": sum(run["fitness"] for run in runs) / len(runs),
-        "levels": sum(run["levels"] for run in runs) / len(runs),
-        "kills": sum(run["kills"] for run in runs) / len(runs),
-        "health": sum(run["health"] for run in runs) / len(runs),
-        "seconds": sum(run["seconds"] for run in runs) / len(runs),
-        "start_level": runs[0]["start_level"],
-    }
-
-
 def run_job(job):
-    genome, executable, cfg, seeds = job
-    return evaluate_candidate(genome, executable, cfg, seeds)
+    genome, executable, cfg, seed = job
+    return evaluate(genome, executable, cfg, seed)
+
+
+def summarize_episodes(episodes):
+    return {
+        "fitness": sum(run["fitness"] for run in episodes) / len(episodes),
+        "levels": sum(run["levels"] for run in episodes) / len(episodes),
+        "kills": sum(run["kills"] for run in episodes) / len(episodes),
+        "health": sum(run["health"] for run in episodes) / len(episodes),
+        "seconds": sum(run["seconds"] for run in episodes) / len(episodes),
+        "start_level": episodes[0]["start_level"],
+    }
 
 
 def main():
@@ -106,12 +110,15 @@ def main():
         for generation in range(start_generation, cfg["generations"]):
             episode_count = cfg["evaluation_episodes"]
             seeds = [cfg["seed"] + generation * episode_count + i for i in range(episode_count)]
-            jobs = [(genome, executable, cfg, seeds) for genome in population]
+            jobs = [(genome, executable, cfg, seed)
+                    for genome in population for seed in seeds]
             with concurrent.futures.ProcessPoolExecutor(
                 max_workers=workers,
                 mp_context=multiprocessing.get_context("spawn"),
             ) as pool:
-                results = list(pool.map(run_job, jobs))
+                episode_results = list(pool.map(run_job, jobs))
+            results = [summarize_episodes(episode_results[i:i + episode_count])
+                       for i in range(0, len(episode_results), episode_count)]
             ranked = sorted(zip(results, population), key=lambda item: item[0]["fitness"], reverse=True)
             best, best_genome = ranked[0]
             mean_fitness = sum(result["fitness"] for result, _ in ranked) / len(ranked)

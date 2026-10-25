@@ -79,7 +79,7 @@ fn load_agent_policy(path: &Path) -> Result<AgentPolicy, String> {
 fn random_level() -> usize {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|time| (time.as_nanos() % 10) as usize)
+        .map(|time| (time.as_nanos() % levels::levels().len() as u128) as usize)
         .unwrap_or(0)
 }
 
@@ -164,7 +164,10 @@ async fn main() {
                 macroquad::miniquad::window::quit();
             }
             if let Some(policy) = &policy {
-                if is_key_pressed(KeyCode::R) || game.dead || completed_levels >= 10 {
+                if is_key_pressed(KeyCode::R)
+                    || game.dead
+                    || completed_levels >= levels::levels().len()
+                {
                     start_agent_episode(&mut game, policy);
                     completed_levels = 0;
                 } else {
@@ -223,8 +226,8 @@ async fn main() {
             );
             let status = policy.as_ref().map_or_else(
                 || "WATCHING BEST AGENT  |  WAITING FOR training/output/best_policy.json  |  Q: QUIT".to_string(),
-                |active| format!("WATCHING BEST AGENT  |  GENERATION {}  |  LEVELS {}/10  |  R: RESTART  Q: QUIT",
-                                 active.generation + 1, completed_levels),
+                |active| format!("WATCHING BEST AGENT  |  GENERATION {}  |  LEVELS {}/{}  |  R: RESTART  Q: QUIT",
+                                 active.generation + 1, completed_levels, levels::levels().len()),
             );
             draw_text(&status, 12.0, 20.0, 16.0, Color::new(1.0, 0.82, 0.48, 1.0));
         }

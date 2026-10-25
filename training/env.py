@@ -5,17 +5,21 @@ from __future__ import annotations
 import json
 import math
 import subprocess
+from collections import deque
+from functools import lru_cache
 from pathlib import Path
 
 
 class HeadlessDoomEnv:
-    def __init__(self, executable: Path, dt: float = 0.05, difficulty: str = "medium"):
+    def __init__(self, executable: Path, dt: float = 0.05, difficulty: str = "medium",
+                 campaign_levels: int = 50):
         self.process = subprocess.Popen(
             [str(executable)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, bufsize=1,
         )
         self.dt = dt
         self.difficulty = difficulty
+        self.campaign_levels = campaign_levels
         self.observation = None
         self.levels_completed = 0
 
@@ -44,7 +48,7 @@ class HeadlessDoomEnv:
         new = self._request(command)
         if new["level"] != old["level"]:
             self.levels_completed += 1
-        done = new["dead"] or self.levels_completed >= 10
+        done = new["dead"] or self.levels_completed >= self.campaign_levels
         return new, done
 
     def close(self):
@@ -129,45 +133,105 @@ def choose_action(weights, obs):
     return action
 
 
+@lru_cache(maxsize=128)
+def _exit_distance_field(rows, exit_x, exit_y):
+    """Four-way shortest-path distance from each open tile to the exit."""
+    height = len(rows)
+    width = len(rows[0]) if rows else 0
+    distances = [[-1] * width for _ in range(height)]
+    if not (0 <= exit_x < width and 0 <= exit_y < height):
+        return tuple(tuple(row) for row in distances)
+    if rows[exit_y][exit_x] in "#BM":
+        return tuple(tuple(row) for row in distances)
+
+    distances[exit_y][exit_x] = 0
+    queue = deque([(exit_x, exit_y)])
+    while queue:
+        x, y = queue.popleft()
+        for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if (0 <= nx < width and 0 <= ny < height and distances[ny][nx] < 0
+                    and rows[ny][nx] not in "#BM"):
+                distances[ny][nx] = distances[y][x] + 1
+                queue.append((nx, ny))
+    return tuple(tuple(row) for row in distances)
+
+
+def exit_path_distance(obs):
+    """Return shortest-path distance in tiles from the player to this level's exit."""
+    rows = tuple(obs["map"])
+    exit_x, exit_y = (int(value) for value in obs["exit"])
+    field = _exit_distance_field(rows, exit_x, exit_y)
+    x, y = int(obs["x"]), int(obs["y"])
+    distance = field[y][x]
+    if distance >= 0:
+        return float(distance)
+    # Malformed or disconnected maps should not crash an evaluation.
+    return math.hypot(obs["exit"][0] - obs["x"], obs["exit"][1] - obs["y"])
+
+
+def total_enemy_health(obs):
+    return sum(enemy["hp"] for enemy in obs["enemies"])
+
+
 def evaluate(weights, executable: Path, cfg, seed: int):
     import random
     rng = random.Random(seed)
     start_level = rng.randrange(cfg["campaign_levels"])
     level_count = 0
-    level_kills = 0
     total_kills = 0
     total_time = 0.0
     level_start_time = 0.0
     score = 0.0
     steps = 0
-    with HeadlessDoomEnv(executable, cfg["time_step_seconds"], cfg["doom_difficulty"]) as env:
+    with HeadlessDoomEnv(executable, cfg["time_step_seconds"], cfg["doom_difficulty"],
+                         cfg["campaign_levels"]) as env:
         obs = env.reset(start_level)
         while steps < cfg["max_steps"]:
-            before = len(obs["enemies"])
+            previous = obs
+            previous_distance = exit_path_distance(previous)
+            previous_enemy_health = total_enemy_health(previous)
             action = choose_action(weights, obs)
             previous_level = obs["level"]
             obs, done = env.step(action)
-            killed = max(0, before - len(obs["enemies"])) if obs["level"] == previous_level else 0
-            level_kills += killed
+            same_level = obs["level"] == previous_level
+            killed = max(0, len(previous["enemies"]) - len(obs["enemies"])) if same_level else 0
             total_kills += killed
             steps += 1
             total_time += cfg["time_step_seconds"]
-            if obs["level"] != previous_level:
+            if same_level:
+                cfg_fitness = cfg["fitness"]
+                score += (previous_distance - exit_path_distance(obs)) * cfg_fitness["exit_progress"]
+                damage_dealt = max(0.0, previous_enemy_health - total_enemy_health(obs))
+                score += damage_dealt * cfg_fitness["damage_dealt"]
+                score += killed * cfg_fitness["kill"]
+
+                health_loss = max(0, previous["health"] - obs["health"])
+                armor_loss = max(0, previous["armor"] - obs["armor"])
+                health_gain = max(0, obs["health"] - previous["health"])
+                armor_gain = max(0, obs["armor"] - previous["armor"])
+                score -= health_loss * cfg_fitness["damage_taken"]
+                score -= armor_loss * cfg_fitness["armor_damage_taken"]
+                score += health_gain * cfg_fitness["health_gain"]
+                score += armor_gain * cfg_fitness["armor_gain"]
+
+                ammo_spent = max(0, sum(previous["ammo"]) - sum(obs["ammo"]))
+                score -= ammo_spent * cfg_fitness["ammo_spent"]
+                if obs["dead"] and not previous["dead"]:
+                    score -= cfg_fitness["death"]
+
+            if not same_level:
                 level_count += 1
-                # Completed level bonus, surviving health, kills, and elapsed time.
+                # Level completion remains the strongest signal, with health and time bonuses.
                 score += cfg["fitness"]["level_completion"]
                 score += obs["health"] * cfg["fitness"]["health_per_point"]
-                score += level_kills * cfg["fitness"]["kill"]
                 score -= (total_time - level_start_time) * cfg["fitness"]["seconds"]
-                level_kills = 0
                 level_start_time = total_time
             if done:
                 break
     # Shape incomplete runs by progress and the score from their current level.
-    if level_count < 10:
+    if level_count < cfg["campaign_levels"]:
         score += level_count * cfg["fitness"]["partial_level"]
         score += obs["health"] * cfg["fitness"]["health_per_point"]
-        score += level_kills * cfg["fitness"]["kill"]
         score -= (total_time - level_start_time) * cfg["fitness"]["seconds"]
     return {"fitness": score, "levels": level_count, "kills": total_kills,
             "health": obs["health"], "seconds": round(total_time, 2), "start_level": start_level}

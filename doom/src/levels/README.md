@@ -2,6 +2,9 @@
 
 Each `.lvl` file describes one level. Edit these files in `src/levels/` before compiling. The build automatically embeds every `.lvl` file in the executable in filename order. After compiling, the game does not read or write these source files, so changing them requires another build to take effect.
 
+The campaign currently contains 50 levels. The original ten are followed by 40
+additional maze-style levels (`11_e2m1.lvl` through `50_e5m10.lvl`).
+
 Files are played in filename order, so the numeric prefix controls campaign order (`01_...`, `02_...`, and so on). Give each level a unique `code`.
 
 ```ini

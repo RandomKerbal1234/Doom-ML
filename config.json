@@ -1,6 +1,6 @@
 {
   "cpu_threads": 0,
-  "generations": 1000,
+  "generations": 10000,
   "population_size": 32,
   "elite_count": 4,
   "parent_pool_size": 12,
@@ -8,10 +8,10 @@
   "mutation_rate": 0.08,
   "mutation_sigma": 0.18,
   "time_step_seconds": 0.05,
-  "max_steps": 3000,
+  "max_steps": 15000,
   "evaluation_episodes": 2,
   "doom_difficulty": "medium",
-  "campaign_levels": 10,
+  "campaign_levels": 50,
   "seed": 20261025,
   "resume": true,
   "output_directory": "training/output",
@@ -23,6 +23,14 @@
     "partial_level": 100.0,
     "health_per_point": 2.0,
     "kill": 20.0,
-    "seconds": 0.25
+    "seconds": 0.25,
+    "exit_progress": 8.0,
+    "damage_dealt": 0.25,
+    "damage_taken": 1.0,
+    "armor_damage_taken": 0.5,
+    "health_gain": 0.5,
+    "armor_gain": 0.25,
+    "ammo_spent": 0.1,
+    "death": 250.0
   }
 }

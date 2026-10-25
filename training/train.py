@@ -17,6 +17,7 @@ from env import evaluate
 
 ROOT = Path(__file__).resolve().parents[1]
 PARAMETERS = 10 * (42 + 1)
+CAMPAIGN_LEVELS = 50
 
 
 def tester_count(value):
@@ -69,8 +70,8 @@ def main():
     workers = tester_count(cfg["cpu_threads"])
     if cfg["doom_difficulty"] not in ("easy", "medium", "hard"):
         raise SystemExit("doom_difficulty must be easy, medium, or hard")
-    if cfg["campaign_levels"] != 10:
-        raise SystemExit("campaign_levels must be 10 for the full DOOM campaign")
+    if cfg["campaign_levels"] != CAMPAIGN_LEVELS:
+        raise SystemExit(f"campaign_levels must be {CAMPAIGN_LEVELS} for the full DOOM campaign")
     if cfg["evaluation_episodes"] < 1 or cfg["population_size"] < 1 or cfg["generations"] < 1:
         raise SystemExit("evaluation_episodes, population_size, and generations must be positive")
     if not 0 < cfg["time_step_seconds"] <= 0.05 or cfg["max_steps"] < 1:

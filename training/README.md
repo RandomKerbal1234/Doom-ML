@@ -1,9 +1,10 @@
 # DOOM machine learning environment
 
 The training loop evolves a small policy from random weights. Each evaluation
-starts at a uniformly random level, then attempts ten exits in campaign order,
-wrapping from the final level to the first. Fitness rewards completed levels,
-health at each exit, demon kills, and shorter completion time. The Rust
+starts at a uniformly random level, then attempts 50 exits in campaign order,
+wrapping from the final level to the first. Fitness rewards level completion,
+shortest-path progress toward each exit, damage dealt, survival, and efficient
+ammo and time use. The Rust
 headless executable runs the same simulation code as the game, without a
 window.
 

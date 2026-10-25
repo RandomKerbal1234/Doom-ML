@@ -1,7 +1,7 @@
 {
   "cpu_threads": 0,
-  "generations": 500,
-  "population_size": 32,
+  "generations": 5000,
+  "population_size": 48,
   "elite_count": 4,
   "parent_pool_size": 12,
   "initial_weight_sigma": 0.35,

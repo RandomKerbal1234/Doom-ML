@@ -12,7 +12,7 @@
   "evaluation_episodes": 2,
   "doom_difficulty": "medium",
   "campaign_levels": 50,
-  "seed": 20261025,
+  "seed": 2001901,
   "resume": true,
   "output_directory": "training/output",
   "checkpoint_file": "checkpoint.json",

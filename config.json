@@ -37,7 +37,7 @@
 // }
 {
   "cpu_threads": 0,
-  "generations": 100,
+  "generations": 20000,
   "population_size": 48,
   "elite_count": 4,
   "parent_pool_size": 12,
@@ -50,25 +50,25 @@
   "doom_difficulty": "medium",
   "campaign_levels": 50,
   "max_levels_per_agent": 1,
-  "seed": 2001901,
+  "seed": 2201901,
   "resume": true,
   "output_directory": "training/output",
   "checkpoint_file": "checkpoint.json",
   "best_policy_file": "best_policy.json",
   "metrics_file": "metrics.csv",
   "fitness": {
-    "level_completion": 1000.0,
+    "level_completion": 800.0,
     "partial_level": 100.0,
     "health_per_point": 2.0,
-    "kill": 20.0,
-    "seconds": 0.25,
+    "kill": 30.0,
+    "seconds": 0.75,
     "exit_progress": 8.0,
-    "damage_dealt": 0.25,
-    "damage_taken": 1.0,
+    "damage_dealt": 0.35,
+    "damage_taken": 2.0,
     "armor_damage_taken": 0.5,
     "health_gain": 0.5,
     "armor_gain": 0.25,
     "ammo_spent": 0.1,
-    "death": 250.0
+    "death": 350.0
   }
 }

@@ -61,9 +61,10 @@ fn main() {
 }
 
 fn evaluate_episode(arguments: &[String]) -> Result<(), String> {
-    if arguments.len() != 9 {
+    if arguments.len() != 10 {
         return Err(
-            "expected start_level, difficulty, dt, max_steps, and five fitness weights".into(),
+            "expected start_level, difficulty, dt, max_steps, max_levels, and five fitness weights"
+                .into(),
         );
     }
     let parse = |index: usize| {
@@ -79,11 +80,17 @@ fn evaluate_episode(arguments: &[String]) -> Result<(), String> {
     let max_steps = arguments[3]
         .parse::<usize>()
         .map_err(|error| format!("invalid max steps: {error}"))?;
-    let level_completion = parse(4)?;
-    let partial_level = parse(5)?;
-    let health_per_point = parse(6)?;
-    let kill_reward = parse(7)?;
-    let seconds_penalty = arguments[8]
+    let max_levels = arguments[4]
+        .parse::<usize>()
+        .map_err(|error| format!("invalid max levels: {error}"))?;
+    if !(1..=50).contains(&max_levels) {
+        return Err("max_levels must be between 1 and 50".into());
+    }
+    let level_completion = parse(5)?;
+    let partial_level = parse(6)?;
+    let health_per_point = parse(7)?;
+    let kill_reward = parse(8)?;
+    let seconds_penalty = arguments[9]
         .parse::<f32>()
         .map_err(|error| format!("invalid seconds penalty: {error}"))?;
 
@@ -142,11 +149,11 @@ fn evaluate_episode(arguments: &[String]) -> Result<(), String> {
             level_kills = 0;
             level_start_time = total_time;
         }
-        if game.dead || level_count >= 10 {
+        if game.dead || level_count >= max_levels {
             break;
         }
     }
-    if level_count < 10 {
+    if level_count < max_levels {
         score += level_count as f32 * partial_level;
         score += game.health as f32 * health_per_point;
         score += level_kills as f32 * kill_reward;

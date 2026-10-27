@@ -18,6 +18,7 @@ from env import evaluate
 ROOT = Path(__file__).resolve().parents[1]
 PARAMETERS = 10 * (42 + 1)
 CAMPAIGN_LEVELS = 50
+MAX_LEVELS_PER_AGENT = 50
 
 
 def tester_count(value):
@@ -68,7 +69,11 @@ def main():
     parser.add_argument("--generations", type=int, help="override configured generation count")
     args = parser.parse_args()
     config_path = args.config.resolve()
-    cfg = json.loads(config_path.read_text())
+    config_text = "\n".join(
+        line for line in config_path.read_text().splitlines()
+        if not line.lstrip().startswith("//")
+    )
+    cfg = json.loads(config_text)
     if args.generations is not None:
         cfg["generations"] = args.generations
     workers = tester_count(cfg["cpu_threads"])
@@ -76,6 +81,9 @@ def main():
         raise SystemExit("doom_difficulty must be easy, medium, or hard")
     if cfg["campaign_levels"] != CAMPAIGN_LEVELS:
         raise SystemExit(f"campaign_levels must be {CAMPAIGN_LEVELS} for the full DOOM campaign")
+    max_levels = cfg["max_levels_per_agent"]
+    if type(max_levels) is not int or not 1 <= max_levels <= MAX_LEVELS_PER_AGENT:
+        raise SystemExit(f"max_levels_per_agent must be between 1 and {MAX_LEVELS_PER_AGENT}")
     if cfg["evaluation_episodes"] < 1 or cfg["population_size"] < 1 or cfg["generations"] < 1:
         raise SystemExit("evaluation_episodes, population_size, and generations must be positive")
     if not 0 < cfg["time_step_seconds"] <= 0.05 or cfg["max_steps"] < 1:

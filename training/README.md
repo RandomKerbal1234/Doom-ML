@@ -37,7 +37,10 @@ simulation step. Episodes are scheduled independently so a population with
 multiple evaluation episodes can use more workers than there are candidates.
 Other settings control population and mutation,
 simulation step size, run length, evaluation episodes, seed, reward weights, checkpointing, and
-output paths. `doom_difficulty` selects Easy, Medium, or Hard game settings.
+output paths. `max_levels_per_agent` limits an agent to 1–50 completed levels per evaluation
+and defaults to 1. `campaign_levels` remains the number of levels in the campaign. The config
+loader accepts full-line `//` comments; the previous config is preserved as commented-out JSON
+at the top of `config.json`. `doom_difficulty` selects Easy, Medium, or Hard game settings.
 Training begins with random policies when no checkpoint exists;
 with `resume` enabled, a saved checkpoint continues at the next generation.
 

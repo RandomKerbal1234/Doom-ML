@@ -9,13 +9,15 @@ from pathlib import Path
 
 
 class HeadlessDoomEnv:
-    def __init__(self, executable: Path, dt: float = 0.05, difficulty: str = "medium"):
+    def __init__(self, executable: Path, dt: float = 0.05, difficulty: str = "medium",
+                 max_levels: int = 1):
         self.process = subprocess.Popen(
             [str(executable)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, bufsize=1,
         )
         self.dt = dt
         self.difficulty = difficulty
+        self.max_levels = max_levels
         self.observation = None
         self.levels_completed = 0
 
@@ -44,7 +46,7 @@ class HeadlessDoomEnv:
         new = self._request(command)
         if new["level"] != old["level"]:
             self.levels_completed += 1
-        done = new["dead"] or self.levels_completed >= 10
+        done = new["dead"] or self.levels_completed >= self.max_levels
         return new, done
 
     def close(self):
@@ -137,6 +139,7 @@ def evaluate(weights, executable: Path, cfg, seed: int):
     command = [
         str(executable), "--evaluate", str(start_level), cfg["doom_difficulty"],
         str(cfg["time_step_seconds"]), str(cfg["max_steps"]),
+        str(cfg["max_levels_per_agent"]),
         str(fitness["level_completion"]), str(fitness["partial_level"]),
         str(fitness["health_per_point"]), str(fitness["kill"]), str(fitness["seconds"]),
     ]

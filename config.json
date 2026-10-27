@@ -37,7 +37,7 @@
 // }
 {
   "cpu_threads": 0,
-  "generations": 100,
+  "generations": 10000,
   "population_size": 48,
   "elite_count": 4,
   "parent_pool_size": 12,
@@ -49,8 +49,8 @@
   "evaluation_episodes": 2,
   "doom_difficulty": "medium",
   "campaign_levels": 50,
-  "max_levels_per_agent": 1,
-  "seed": 2001901,
+  "max_levels_per_agent": 50,
+  "seed": 3002901,
   "resume": true,
   "output_directory": "training/output",
   "checkpoint_file": "checkpoint.json",

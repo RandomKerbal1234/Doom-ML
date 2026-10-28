@@ -1,0 +1,9 @@
+#!/bin/sh
+PROJECT_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+GAME="$PROJECT_DIR/target/release/doom"
+if [ ! -x "$GAME" ]; then
+  /usr/bin/osascript -e 'display alert "DOOM is not built yet" message "Build the game by running cargo build --release in the project folder."'
+  exit 1
+fi
+cd "$PROJECT_DIR"
+exec "$GAME" </dev/null >/dev/null 2>&1

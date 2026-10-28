@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+"""Train a compact DOOM policy with parallel, from-scratch evolution."""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import csv
+import json
+import os
+import random
+import subprocess
+import threading
+import time
+from pathlib import Path
+
+from env import Evaluator
+
+ROOT = Path(__file__).resolve().parents[1]
+PARAMETERS = 10 * (42 + 1)
+CAMPAIGN_LEVELS = 50
+PROFILE_ENABLED = os.environ.get("DOOM_PROFILE", "") not in ("", "0")
+PROFILE_KEYS = (
+    "steps", "levels", "main_ns", "levels_ns", "setup_ns", "policy_ns",
+    "sim_ns", "killcount_ns", "loop_other_ns", "total_ns", "level_load_ns",
+    "movement_ns", "fire_ns", "update_ns", "enemy_ns", "danger_ns", "pickup_ns",
+)
+
+
+def tester_count(value):
+    if hasattr(os, "process_cpu_count"):
+        available = os.process_cpu_count() or 1
+    elif hasattr(os, "sched_getaffinity"):
+        available = len(os.sched_getaffinity(0)) or 1
+    else:
+        available = os.cpu_count() or 1
+    if value == 0:
+        return available
+    if value == -1:
+        return max(1, available - 1)
+    if value < -1:
+        raise ValueError("cpu_threads must be -1, 0, or a positive number")
+    return value
+
+
+def mutate(parent, cfg, rng):
+    sigma = cfg["mutation_sigma"]
+    child = parent[:]
+    for i in range(len(child)):
+        if rng.random() < cfg["mutation_rate"]:
+            child[i] += rng.gauss(0, sigma)
+    return child
+
+
+_WORKER = threading.local()
+_EVALUATORS = []
+_EVALUATORS_LOCK = threading.Lock()
+
+
+def initialize_worker(executable, cfg):
+    """Give every thread its own long-lived evaluator process.
+
+    The Rust evaluator owns all of the simulated state, so the Python side
+    only forwards a weight vector and reads one JSON result. Threads therefore
+    spend their time blocked on a pipe instead of holding the GIL, and we avoid
+    re-spawning the simulator for each of the thousands of episodes per
+    generation.
+    """
+    _WORKER.cfg = cfg
+    _WORKER.evaluator = Evaluator(executable, profile=PROFILE_ENABLED)
+    _WORKER.evaluator.warm_up(cfg)
+    with _EVALUATORS_LOCK:
+        _EVALUATORS.append(_WORKER.evaluator)
+
+
+def close_evaluators():
+    with _EVALUATORS_LOCK:
+        evaluators, _EVALUATORS[:] = list(_EVALUATORS), []
+    for evaluator in evaluators:
+        evaluator.close()
+
+
+def run_job(job):
+    genome, seed = job
+    return _WORKER.evaluator.evaluate(genome, _WORKER.cfg, seed)
+
+
+def make_pool(executable, cfg, workers):
+    return concurrent.futures.ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix="doom-eval",
+        initializer=initialize_worker,
+        initargs=(str(executable), cfg),
+    )
+
+
+def profile_totals(episodes):
+    """Sum Rust-side timings across every episode in one generation."""
+    totals = {key: 0 for key in PROFILE_KEYS}
+    for episode in episodes:
+        stats = episode.get("profile") or {}
+        for key in PROFILE_KEYS:
+            totals[key] += stats.get(key, 0)
+    return totals
+
+
+def nanoseconds(value):
+    return value / 1_000_000_000.0
+
+
+def summarize_episodes(episodes):
+    return {
+        "fitness": sum(run["fitness"] for run in episodes) / len(episodes),
+        "levels": sum(run["levels"] for run in episodes) / len(episodes),
+        "kills": sum(run["kills"] for run in episodes) / len(episodes),
+        "health": sum(run["health"] for run in episodes) / len(episodes),
+        "seconds": sum(run["seconds"] for run in episodes) / len(episodes),
+        "start_level": episodes[0]["start_level"],
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=ROOT / "config.json")
+    parser.add_argument("--build", action="store_true", help="build the release binaries first")
+    parser.add_argument("--generations", type=int, help="override configured generation count")
+    args = parser.parse_args()
+    config_path = args.config.resolve()
+    cfg = json.loads(config_path.read_text())
+    if args.generations is not None:
+        cfg["generations"] = args.generations
+    workers = tester_count(cfg["cpu_threads"])
+    if cfg["doom_difficulty"] not in ("easy", "medium", "hard"):
+        raise SystemExit("doom_difficulty must be easy, medium, or hard")
+    if cfg["campaign_levels"] != CAMPAIGN_LEVELS:
+        raise SystemExit(f"campaign_levels must be {CAMPAIGN_LEVELS} for the full DOOM campaign")
+    if cfg["evaluation_episodes"] < 1 or cfg["population_size"] < 1 or cfg["generations"] < 1:
+        raise SystemExit("evaluation_episodes, population_size, and generations must be positive")
+    if not 0 < cfg["time_step_seconds"] <= 0.05 or cfg["max_steps"] < 1:
+        raise SystemExit("time_step_seconds must be in (0, 0.05] and max_steps must be positive")
+    executable = ROOT / "doom/target/release/doom_headless"
+    if args.build:
+        subprocess.run([str(ROOT / "exec_mgmt.sh"), "-b"], cwd=ROOT, check=True)
+    if not executable.is_file():
+        raise SystemExit(f"{executable} is missing. Build with: ./exec_mgmt.sh -b")
+
+    output = (ROOT / cfg["output_directory"]).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output / cfg["checkpoint_file"]
+    rng = random.Random(cfg["seed"])
+    if cfg["resume"] and checkpoint_path.exists():
+        saved = json.loads(checkpoint_path.read_text())
+        population = saved["population"]
+        start_generation = saved["generation"] + 1
+        rng.setstate(tuple_state(saved["random_state"]))
+        print(f"Resuming at generation {start_generation} from {checkpoint_path}")
+    else:
+        population = [[rng.gauss(0, cfg["initial_weight_sigma"]) for _ in range(PARAMETERS)]
+                      for _ in range(cfg["population_size"])]
+        start_generation = 0
+
+    metrics_path = output / cfg["metrics_file"]
+    exists = metrics_path.exists() and start_generation > 0
+    profile_path = output / cfg.get("profile_file", "profile.csv")
+    profile_exists = profile_path.exists() and start_generation > 0
+    profile_columns = (
+        "generation", "episodes", "steps", "generation_s", "jobs_s", "eval_s",
+        "rank_s", "evolve_s", "write_s", "generation_other_s",
+        "episode_wall_s", "startup_s", "rust_main_s", "rust_eval_s",
+        "rust_levels_s", "setup_s", "policy_s", "sim_s", "killcount_s",
+        "loop_other_s", "movement_s", "fire_s", "update_s", "enemy_s",
+        "danger_s", "pickup_s", "level_load_s",
+    )
+    profile_rows = []
+    main_start = time.perf_counter()
+    pool = make_pool(executable, cfg, workers)
+    with metrics_path.open("a" if exists else "w", newline="") as metrics_file, \
+            profile_path.open("a" if profile_exists else "w", newline="") as profile_file:
+        writer = csv.DictWriter(metrics_file, fieldnames=("generation", "best_fitness", "mean_fitness",
+                                "levels", "kills", "health", "seconds", "start_level"))
+        if not exists:
+            writer.writeheader()
+        profiler = csv.DictWriter(profile_file, fieldnames=profile_columns)
+        if not profile_exists:
+            profiler.writeheader()
+        for generation in range(start_generation, cfg["generations"]):
+            generation_start = time.perf_counter()
+            episode_count = cfg["evaluation_episodes"]
+            seeds = [cfg["seed"] + generation * episode_count + i for i in range(episode_count)]
+            jobs = [(genome, seed)
+                    for genome in population for seed in seeds]
+            jobs_done = time.perf_counter()
+            episode_results = list(pool.map(run_job, jobs))
+            evaluation_done = time.perf_counter()
+            results = [summarize_episodes(episode_results[i:i + episode_count])
+                       for i in range(0, len(episode_results), episode_count)]
+            ranked = sorted(zip(results, population), key=lambda item: item[0]["fitness"], reverse=True)
+            ranked_done = time.perf_counter()
+            best, best_genome = ranked[0]
+            mean_fitness = sum(result["fitness"] for result, _ in ranked) / len(ranked)
+            print(f"generation {generation + 1}/{cfg['generations']} | testers {workers} | "
+                  f"best {best['fitness']:.1f} | levels {best['levels']} | kills {best['kills']} | "
+                  f"hp {best['health']} | {best['seconds']:.1f}s", flush=True)
+            writer.writerow({"generation": generation, "best_fitness": round(best["fitness"], 3),
+                             "mean_fitness": round(mean_fitness, 3), **{k: best[k] for k in
+                             ("levels", "kills", "health", "seconds", "start_level")}})
+            metrics_file.flush()
+
+            elite_count = max(1, min(cfg["elite_count"], cfg["population_size"]))
+            next_population = [genome[:] for _, genome in ranked[:elite_count]]
+            while len(next_population) < cfg["population_size"]:
+                parent = ranked[rng.randrange(min(cfg["parent_pool_size"], len(ranked)))][1]
+                next_population.append(mutate(parent, cfg, rng))
+            population = next_population
+            evolution_done = time.perf_counter()
+            checkpoint_path.write_text(json.dumps({
+                "generation": generation,
+                "population": population,
+                "best_result": best,
+                "best_genome": best_genome,
+                "random_state": list_state(rng.getstate()),
+            }))
+            (output / cfg["best_policy_file"]).write_text(json.dumps({
+                "architecture": {"inputs": 42, "outputs": 10, "activation": "tanh-linear"},
+                "generation": generation,
+                "doom_difficulty": cfg["doom_difficulty"],
+                "result": best,
+                "weights": best_genome,
+            }))
+            writes_done = time.perf_counter()
+
+            totals = profile_totals(episode_results)
+            episode_wall = sum(run["wall_seconds"] for run in episode_results)
+            rust_main = nanoseconds(totals["main_ns"])
+            row = {
+                "generation": generation,
+                "episodes": len(episode_results),
+                "steps": totals["steps"],
+                "generation_s": round(writes_done - generation_start, 6),
+                "jobs_s": round(jobs_done - generation_start, 6),
+                "eval_s": round(evaluation_done - jobs_done, 6),
+                "rank_s": round(ranked_done - evaluation_done, 6),
+                "evolve_s": round(evolution_done - ranked_done, 6),
+                "write_s": round(writes_done - evolution_done, 6),
+                "generation_other_s": round(
+                    (writes_done - generation_start)
+                    - (evaluation_done - jobs_done)
+                    - (ranked_done - evaluation_done)
+                    - (evolution_done - ranked_done)
+                    - (writes_done - evolution_done),
+                    6,
+                ),
+                "episode_wall_s": round(episode_wall, 6),
+                "startup_s": round(max(0.0, episode_wall - rust_main), 6),
+                "rust_main_s": round(rust_main, 6),
+                "rust_eval_s": round(nanoseconds(totals["total_ns"]), 6),
+                "rust_levels_s": round(nanoseconds(totals["levels_ns"]), 6),
+                "setup_s": round(nanoseconds(totals["setup_ns"]), 6),
+                "policy_s": round(nanoseconds(totals["policy_ns"]), 6),
+                "sim_s": round(nanoseconds(totals["sim_ns"]), 6),
+                "killcount_s": round(nanoseconds(totals["killcount_ns"]), 6),
+                "loop_other_s": round(nanoseconds(totals["loop_other_ns"]), 6),
+                "movement_s": round(nanoseconds(totals["movement_ns"]), 6),
+                "fire_s": round(nanoseconds(totals["fire_ns"]), 6),
+                "update_s": round(nanoseconds(totals["update_ns"]), 6),
+                "enemy_s": round(nanoseconds(totals["enemy_ns"]), 6),
+                "danger_s": round(nanoseconds(totals["danger_ns"]), 6),
+                "pickup_s": round(nanoseconds(totals["pickup_ns"]), 6),
+                "level_load_s": round(nanoseconds(totals["level_load_ns"]), 6),
+            }
+            profile_rows.append(row)
+            profiler.writerow(row)
+            profile_file.flush()
+            if PROFILE_ENABLED:
+                measured = row["episode_wall_s"] or 1.0
+                print(
+                    f"  profile | gen {row['generation_s']:.2f}s "
+                    f"(eval {row['eval_s']:.2f}s) | episode wall {measured:.2f}s: "
+                    f"startup {row['startup_s']:.2f}s "
+                    f"({100 * row['startup_s'] / measured:.1f}%), "
+                    f"rust {row['rust_main_s']:.2f}s "
+                    f"(policy {row['policy_s']:.2f}s, sim {row['sim_s']:.2f}s, "
+                    f"killscan {row['killcount_s']:.2f}s)",
+                    flush=True,
+                )
+                rust_measured = row["rust_main_s"] or 1.0
+                print(
+                    f"          sim | update {row['update_s']:.2f}s "
+                    f"({100 * row['update_s'] / rust_measured:.1f}% of rust: "
+                    f"enemy {row['enemy_s']:.2f}s, danger {row['danger_s']:.2f}s, "
+                    f"pickup {row['pickup_s']:.2f}s) | movement "
+                    f"{row['movement_s']:.2f}s | fire {row['fire_s']:.2f}s",
+                    flush=True,
+                )
+
+    pool.shutdown(wait=True)
+    close_evaluators()
+
+    if profile_rows:
+        numeric_keys = profile_columns[3:]
+        totals = {key: sum(row[key] for row in profile_rows) for key in numeric_keys}
+        summary = {
+            "profile_enabled": PROFILE_ENABLED,
+            "generations": len(profile_rows),
+            "wall_seconds": round(time.perf_counter() - main_start, 6),
+            "totals": {key: round(value, 6) for key, value in totals.items()},
+            "per_generation_mean": {
+                key: round(value / len(profile_rows), 6) for key, value in totals.items()
+            },
+            "percent_of_episode_wall": {
+                key: round(100 * totals[key] / max(totals["episode_wall_s"], 1e-9), 3)
+                for key in numeric_keys if key != "episode_wall_s"
+            },
+        }
+        (output / cfg.get("profile_summary_file", "profile_summary.json")).write_text(
+            json.dumps(summary, indent=2)
+        )
+        if PROFILE_ENABLED:
+            total_wall = summary["wall_seconds"]
+            print(
+                f"profile summary | {len(profile_rows)} generations in {total_wall:.2f}s "
+                f"| episode CPU {totals['episode_wall_s']:.2f}s "
+                f"| startup {totals['startup_s']:.2f}s "
+                f"({100 * totals['startup_s'] / max(totals['episode_wall_s'], 1e-9):.1f}%) "
+                f"| rust {totals['rust_main_s']:.2f}s "
+                f"| policy {totals['policy_s']:.2f}s | sim {totals['sim_s']:.2f}s",
+                flush=True,
+            )
+
+
+def list_state(value):
+    return [value[0], list(value[1]), value[2]]
+
+
+def tuple_state(value):
+    return (value[0], tuple(value[1]), value[2])
+
+
+if __name__ == "__main__":
+    main()

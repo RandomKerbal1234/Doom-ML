@@ -80,7 +80,7 @@ def main():
         raise SystemExit("evaluation_episodes, population_size, and generations must be positive")
     if not 0 < cfg["time_step_seconds"] <= 0.05 or cfg["max_steps"] < 1:
         raise SystemExit("time_step_seconds must be in (0, 0.05] and max_steps must be positive")
-    executable = ROOT / "doom/target/release/doom_headless"
+    executable = ROOT / "doom/target/release/doom_headless.exe"
     if args.build:
         subprocess.run([str(ROOT / "exec_mgmt.sh"), "-b"], cwd=ROOT, check=True)
     if not executable.is_file():

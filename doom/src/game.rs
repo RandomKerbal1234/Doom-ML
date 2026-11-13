@@ -85,6 +85,18 @@ pub(crate) struct Game {
     pub(crate) muzzle_timer: f32,
     pub(crate) muzzle_weapon: usize,
     pub(crate) damage_flash: f32,
+    #[allow(dead_code)] // Read by the headless evaluator's reward terms.
+    pub(crate) damage_dealt: f32,
+    #[allow(dead_code)] // Read by the headless evaluator's reward terms.
+    pub(crate) damage_taken: i32,
+    #[allow(dead_code)] // Read by the headless evaluator's reward terms.
+    pub(crate) armor_damage_taken: i32,
+    #[allow(dead_code)] // Read by the headless evaluator's reward terms.
+    pub(crate) health_gain: i32,
+    #[allow(dead_code)] // Read by the headless evaluator's reward terms.
+    pub(crate) armor_gain: i32,
+    #[allow(dead_code)] // Read by the headless evaluator's reward terms.
+    pub(crate) ammo_spent: i32,
     pub(crate) danger: bool,
     pub(crate) danger_angle: f32,
     pub(crate) message: String,
@@ -125,6 +137,12 @@ impl Game {
             muzzle_timer: 0.0,
             muzzle_weapon: 0,
             damage_flash: 0.0,
+            damage_dealt: 0.0,
+            damage_taken: 0,
+            armor_damage_taken: 0,
+            health_gain: 0,
+            armor_gain: 0,
+            ammo_spent: 0,
             danger: false,
             danger_angle: 0.0,
             message: String::new(),
@@ -187,7 +205,17 @@ impl Game {
         self.paused = false;
         self.settings_open = false;
         self.selected_level = first_level;
+        self.reset_agent_stats();
         self.load_level(first_level);
+    }
+
+    fn reset_agent_stats(&mut self) {
+        self.damage_dealt = 0.0;
+        self.damage_taken = 0;
+        self.armor_damage_taken = 0;
+        self.health_gain = 0;
+        self.armor_gain = 0;
+        self.ammo_spent = 0;
     }
 
     /// Starts a fresh headless training episode at the requested level.
@@ -858,13 +886,17 @@ impl Game {
                     self.message = "ROCKET LAUNCHER ACQUIRED".to_string();
                 }
                 PickupKind::Medkit => {
+                    let before = self.health;
                     self.health = (self.health + self.settings.medkit_heal.round() as i32)
                         .min(self.settings.max_health.round() as i32);
+                    self.health_gain += (self.health - before).max(0);
                     self.message = "MEDIKIT +30".to_string();
                 }
                 PickupKind::Armor => {
+                    let before = self.armor;
                     self.armor = (self.armor + self.settings.armor_pickup.round() as i32)
                         .min(self.settings.max_armor.round() as i32);
+                    self.armor_gain += (self.armor - before).max(0);
                     self.message = "ARMOR +40".to_string();
                 }
                 PickupKind::Ammo => {
@@ -895,6 +927,7 @@ impl Game {
         self.dead = false;
         self.won = false;
         self.paused = false;
+        self.reset_agent_stats();
         self.load_level(0);
     }
 
@@ -952,6 +985,7 @@ impl Game {
             return;
         }
         self.ammo[self.weapon] -= ammo_cost;
+        self.ammo_spent += ammo_cost;
         self.shot_timer = delay;
         self.recoil = 1.0;
         self.muzzle_timer = 0.12;
@@ -985,11 +1019,13 @@ impl Game {
             let hit_x = self.enemies[index].x;
             let hit_y = self.enemies[index].y;
             if self.weapon == 3 {
+                let mut dealt = 0.0;
                 for enemy in &mut self.enemies {
                     if enemy.alive
                         && distance(hit_x, hit_y, enemy.x, enemy.y)
                             < self.settings.rocket_blast_radius
                     {
+                        dealt += damage.min(enemy.hp.max(0.0));
                         enemy.hp -= damage;
                         enemy.hurt_timer = 0.18;
                         if enemy.hp <= 0.0 {
@@ -997,18 +1033,24 @@ impl Game {
                         }
                     }
                 }
+                self.damage_dealt += dealt;
             } else {
                 let falloff = if self.weapon == 1 {
                     (1.0 - best_dist / 15.0).max(0.55)
                 } else {
                     1.0
                 };
-                let enemy = &mut self.enemies[index];
-                enemy.hp -= damage * falloff;
-                enemy.hurt_timer = 0.18;
-                if enemy.hp <= 0.0 {
-                    enemy.alive = false;
-                }
+                let applied = {
+                    let enemy = &mut self.enemies[index];
+                    let applied = (damage * falloff).min(enemy.hp.max(0.0));
+                    enemy.hp -= damage * falloff;
+                    enemy.hurt_timer = 0.18;
+                    if enemy.hp <= 0.0 {
+                        enemy.alive = false;
+                    }
+                    applied
+                };
+                self.damage_dealt += applied;
             }
             self.add_impact_effect(hit_x, hit_y, ImpactKind::Enemy);
         } else {
@@ -1078,10 +1120,14 @@ impl Game {
     }
 
     fn take_damage(&mut self, damage: i32) {
+        let health_before = self.health;
+        let armor_before = self.armor;
         let absorbed = (damage as f32 * self.settings.armor_absorption).round() as i32;
         let absorbed = absorbed.min(self.armor);
         self.armor -= absorbed;
         self.health -= damage - absorbed;
+        self.damage_taken += (health_before - self.health).max(0);
+        self.armor_damage_taken += (armor_before - self.armor).max(0);
         self.damage_flash = 0.20;
         if self.health <= 0 {
             self.health = 0;

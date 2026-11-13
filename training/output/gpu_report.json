@@ -1,0 +1,82 @@
+{
+  "mode": "auto",
+  "requested_backend": "auto",
+  "gpus": [
+    {
+      "vendor": "apple",
+      "name": "Apple M1 Pro",
+      "backend": "mps",
+      "architecture": "Apple GPU (M1 Pro)",
+      "generation": "M1 Pro",
+      "compute_capability": null,
+      "driver": "Metal (built into macOS)",
+      "driver_version": "27.2",
+      "minimum_driver": "macOS 11.0+ for Metal, 12.3+ for PyTorch MPS",
+      "driver_status": "ok",
+      "memory_mb": 32768,
+      "unified_memory": true,
+      "cores": 16,
+      "metal_version": "4",
+      "tuning": {
+        "dtype": "float32",
+        "batch_size": 1024,
+        "tf32": false,
+        "fp16": true,
+        "bf16": false,
+        "fp8": false,
+        "matmul_precision": "high",
+        "note": "Metal Performance Shaders; no separate driver install."
+      },
+      "notes": "MPS uses unified memory; leave headroom for the OS."
+    }
+  ],
+  "selected": {
+    "vendor": "apple",
+    "name": "Apple M1 Pro",
+    "backend": "mps",
+    "architecture": "Apple GPU (M1 Pro)",
+    "generation": "M1 Pro",
+    "compute_capability": null,
+    "driver": "Metal (built into macOS)",
+    "driver_version": "27.2",
+    "minimum_driver": "macOS 11.0+ for Metal, 12.3+ for PyTorch MPS",
+    "driver_status": "ok",
+    "memory_mb": 32768,
+    "unified_memory": true,
+    "cores": 16,
+    "metal_version": "4",
+    "tuning": {
+      "dtype": "float32",
+      "batch_size": 1024,
+      "tf32": false,
+      "fp16": true,
+      "bf16": false,
+      "fp8": false,
+      "matmul_precision": "high",
+      "note": "Metal Performance Shaders; no separate driver install."
+    },
+    "notes": "MPS uses unified memory; leave headroom for the OS."
+  },
+  "torch": {
+    "installed": true,
+    "version": "2.8.0",
+    "cuda": false,
+    "rocm": false,
+    "mps": true,
+    "xpu": false,
+    "devices": [
+      "Apple MPS"
+    ],
+    "error": null
+  },
+  "compute": {
+    "use_gpu": false,
+    "device": "cpu",
+    "dtype": "float32",
+    "batch_size": 1,
+    "call_timeout": 30.0,
+    "reason": "Apple M1 Pro was detected, but this 430-weight policy is much faster on the CPU path. Pass --gpu (or set gpu.mode to force) to use the GPU anyway."
+  },
+  "warnings": [],
+  "error": null
+}

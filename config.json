@@ -1,8 +1,8 @@
 {
   "cpu_threads": 0,
-  "generations": 50,
-  "population_size": 48,
-  "elite_count": 4,
+  "generations": 100,
+  "population_size": 96,
+  "elite_count": 6,
   "parent_pool_size": 12,
   "initial_weight_sigma": 0.35,
   "mutation_rate": 0.08,
@@ -18,6 +18,17 @@
   "checkpoint_file": "checkpoint.json",
   "best_policy_file": "best_policy.json",
   "metrics_file": "metrics.csv",
+  "gpu": {
+    "mode": "auto",
+    "backend": "auto",
+    "device": "auto",
+    "precision": "auto",
+    "batch_size": 0,
+    "call_timeout": 30,
+    "step_timeout": 60,
+    "fallback_to_cpu": true,
+    "report": true
+  },
   "fitness": {
     "level_completion": 1000.0,
     "partial_level": 100.0,

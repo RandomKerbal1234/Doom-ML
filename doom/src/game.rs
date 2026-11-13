@@ -270,7 +270,7 @@ impl Game {
             .filter(|e| e.alive)
             .map(|e| {
                 format!(
-                    "{{\"x\":{:.3},\"y\":{:.3},\"hp\":{:.2},\"kind\":{}}}",
+                    "{{\"x\":{:.6},\"y\":{:.6},\"hp\":{:.3},\"kind\":{}}}",
                     e.x, e.y, e.hp, e.kind
                 )
             })
@@ -282,7 +282,7 @@ impl Game {
             .filter(|p| p.active)
             .map(|p| {
                 format!(
-                    "{{\"x\":{:.3},\"y\":{:.3},\"kind\":\"{}\"}}",
+                    "{{\"x\":{:.6},\"y\":{:.6},\"kind\":\"{}\"}}",
                     p.x,
                     p.y,
                     p.kind.label()
@@ -297,7 +297,7 @@ impl Game {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "{{\"level\":{},\"x\":{:.3},\"y\":{:.3},\"angle\":{:.4},\"health\":{},\"armor\":{},\"ammo\":[{},{},{},{}],\"unlocked\":[{},{},{},{}],\"weapon\":{},\"time\":{:.3},\"dead\":{},\"exit\":[{:.3},{:.3}],\"map\":[{}],\"enemies\":[{}],\"pickups\":[{}]}}",
+            "{{\"level\":{},\"x\":{:.6},\"y\":{:.6},\"angle\":{:.8},\"health\":{},\"armor\":{},\"ammo\":[{},{},{},{}],\"unlocked\":[{},{},{},{}],\"weapon\":{},\"time\":{:.6},\"dead\":{},\"exit\":[{:.6},{:.6}],\"map\":[{}],\"enemies\":[{}],\"pickups\":[{}]}}",
             self.level_index,
             self.x,
             self.y,

@@ -44,6 +44,6 @@ In settings, use **Up / Down** to select a value, **Left / Right** to change it,
 
 The four settings sections cover player health, armor, movement and ammo; each weapon's damage, range, spread, fire delay and ammo cost; demon health, movement, detection and attack stats; and pickup amounts and reach. Edits take effect immediately.
 
-Find the shotgun, chaingun, and rocket launcher pickups across the ten levels. Walk over health, armor, and ammo supplies to collect them. A pulsing **DEMON IN RANGE** alert appears when a demon has a clear shot at you, with an edge marker pointing toward the nearest threat.
+Find the shotgun, chaingun, and rocket launcher pickups across the fifty levels. Walk over health, armor, and ammo supplies to collect them. A pulsing **DEMON IN RANGE** alert appears when a demon has a clear shot at you, with an edge marker pointing toward the nearest threat.
 
 Level sources are the editable `.lvl` files in [`src/levels/`](src/levels/README.md). They are embedded into the executable during compilation; the game does not read or modify them at runtime. See the folder's README for the level format and ordering rules.

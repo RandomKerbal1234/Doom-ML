@@ -4,18 +4,78 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import random
 import subprocess
+import time
 from pathlib import Path
 
 
+FITNESS_WEIGHT_KEYS = (
+    "level_completion",
+    "partial_level",
+    "health_per_point",
+    "kill",
+    "seconds",
+    "exit_progress",
+    "damage_dealt",
+    "damage_taken",
+    "armor_damage_taken",
+    "health_gain",
+    "armor_gain",
+    "ammo_spent",
+    "death",
+)
+
+
+def start_level_bounds(cfg):
+    """Return the inclusive 1-based `(low, high)` campaign-level range.
+
+    `start_level` is either a two-element array `[low, high]` or the integer
+    shorthand: `0` means the whole campaign and `N` means `[N, N]`.
+    """
+    value = cfg.get("start_level", 0)
+    levels = int(cfg["campaign_levels"])
+    if isinstance(value, (list, tuple)):
+        if len(value) != 2:
+            raise ValueError("start_level must be a two-element [low, high] array")
+        low, high = value
+        if any(
+            isinstance(bound, bool) or not isinstance(bound, int) for bound in (low, high)
+        ):
+            raise ValueError("start_level bounds must be integers")
+    elif isinstance(value, int) and not isinstance(value, bool):
+        low, high = (1, levels) if value == 0 else (value, value)
+    else:
+        raise ValueError("start_level must be a [low, high] array or an integer")
+    if not 1 <= low <= high <= levels:
+        raise ValueError(
+            f"start_level must satisfy 1 <= low <= high <= {levels}"
+        )
+    return low, high
+
+
+def resolve_start_level(cfg, seed: int) -> int:
+    """Return the 0-based level an episode should start on.
+
+    The configured range is inclusive and 1-based, so `[3, 5]` can start on
+    campaign levels 3, 4, or 5 (indices 2, 3, 4), chosen uniformly from the
+    evaluation seed.
+    """
+    low, high = start_level_bounds(cfg)
+    return random.Random(seed).randrange(low - 1, high)
+
+
 class HeadlessDoomEnv:
-    def __init__(self, executable: Path, dt: float = 0.05, difficulty: str = "medium"):
+    def __init__(self, executable: Path, dt: float = 0.05, difficulty: str = "medium",
+                 max_levels: int = 10):
         self.process = subprocess.Popen(
             [str(executable)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, bufsize=1,
         )
         self.dt = dt
         self.difficulty = difficulty
+        self.max_levels = max(1, int(max_levels))
         self.observation = None
         self.levels_completed = 0
 
@@ -44,7 +104,7 @@ class HeadlessDoomEnv:
         new = self._request(command)
         if new["level"] != old["level"]:
             self.levels_completed += 1
-        done = new["dead"] or self.levels_completed >= 10
+        done = new["dead"] or self.levels_completed >= self.max_levels
         return new, done
 
     def close(self):
@@ -129,20 +189,115 @@ def choose_action(weights, obs):
     return action
 
 
-def evaluate(weights, executable: Path, cfg, seed: int):
-    import random
-    rng = random.Random(seed)
-    start_level = rng.randrange(cfg["campaign_levels"])
-    fitness = cfg["fitness"]
-    command = [
-        str(executable), "--evaluate", str(start_level), cfg["doom_difficulty"],
-        str(cfg["time_step_seconds"]), str(cfg["max_steps"]),
-        str(fitness["level_completion"]), str(fitness["partial_level"]),
-        str(fitness["health_per_point"]), str(fitness["kill"]), str(fitness["seconds"]),
-    ]
-    result = subprocess.run(command, input=",".join(map(str, weights)), text=True,
-                            capture_output=True, check=True)
-    score, levels, kills, health, seconds, returned_start_level = result.stdout.strip().split(",")
-    return {"fitness": float(score), "levels": int(levels), "kills": int(kills),
-            "health": int(health), "seconds": float(seconds),
-            "start_level": int(returned_start_level)}
+def evaluate(weights, executable: Path, cfg, seed: int, profile: bool = False):
+    """Evaluate one episode in a one-shot subprocess.
+
+    Kept for compatibility and single-shot benchmarking. Training uses
+    `Evaluator` below, which keeps a server process alive between episodes.
+    """
+    with Evaluator(executable, profile=profile) as evaluator:
+        return evaluator.evaluate(weights, cfg, seed)
+
+
+class Evaluator:
+    """A persistent `doom_headless --evaluate-server` process.
+
+    Each request re-seeds the reusable `Game` and runs a complete episode. The
+    expensive parts that used to run per episode -- process launch, dynamic
+    linking, level parsing, and the initial game allocation -- happen once per
+    worker instead.
+    """
+
+    def __init__(self, executable: Path, profile: bool = False):
+        self.executable = Path(executable)
+        self.profile = profile
+        self.process = None
+        self.starts = 0
+        self._start()
+
+    def _start(self):
+        environment = os.environ.copy()
+        if self.profile:
+            environment["DOOM_PROFILE"] = "1"
+        self.process = subprocess.Popen(
+            [str(self.executable), "--evaluate-server"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, bufsize=1, env=environment,
+        )
+        self.starts += 1
+
+    def _request(self, line: str):
+        if self.process.poll() is not None:
+            raise RuntimeError("doom_headless evaluate-server exited")
+        assert self.process.stdin and self.process.stdout
+        self.process.stdin.write(line + "\n")
+        self.process.stdin.flush()
+        reply = self.process.stdout.readline()
+        if not reply:
+            raise RuntimeError("doom_headless evaluate-server closed its output")
+        result = json.loads(reply)
+        if "error" in result:
+            raise RuntimeError(result["error"])
+        return result
+
+    def evaluate(self, weights, cfg, seed: int, max_steps: int | None = None):
+        fitness = cfg["fitness"]
+        missing = [key for key in FITNESS_WEIGHT_KEYS if key not in fitness]
+        if missing:
+            raise ValueError(f"fitness configuration is missing: {', '.join(missing)}")
+        max_levels = int(cfg.get("max_levels_per_agent", 10))
+        if max_levels < 1:
+            raise ValueError("max_levels_per_agent must be positive")
+        start_level = resolve_start_level(cfg, seed)
+        steps = cfg["max_steps"] if max_steps is None else max_steps
+        header = ",".join((
+            str(start_level), cfg["doom_difficulty"], str(cfg["time_step_seconds"]),
+            str(steps), str(max_levels),
+            *(str(fitness[key]) for key in FITNESS_WEIGHT_KEYS),
+        ))
+        line = header + "," + ",".join(map(str, weights))
+        started = time.perf_counter()
+        try:
+            result = self._request(line)
+        except (BrokenPipeError, RuntimeError, json.JSONDecodeError):
+            # A crashed server is restarted and the episode retried once. This
+            # is safe because every job starts from a freshly reset game.
+            self.close()
+            self._start()
+            result = self._request(line)
+        wall_seconds = time.perf_counter() - started
+        return {
+            "fitness": float(result["score"]),
+            "levels": int(result["levels"]),
+            "kills": int(result["kills"]),
+            "health": int(result["health"]),
+            "seconds": float(result["seconds"]),
+            "start_level": int(result["start_level"]),
+            "wall_seconds": wall_seconds,
+            "profile": result.get("profile") or {},
+        }
+
+    def warm_up(self, cfg):
+        """Run one trivial episode so level parsing is done before timing."""
+        return self.evaluate([0.0] * 430, cfg, seed=0, max_steps=1)
+
+    def close(self):
+        process = self.process
+        if process is None:
+            return
+        self.process = None
+        if process.poll() is None:
+            try:
+                assert process.stdin
+                process.stdin.close()
+                process.wait(timeout=2)
+            except (BrokenPipeError, subprocess.TimeoutExpired, ValueError):
+                process.kill()
+                process.wait()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+

@@ -1,0 +1,153 @@
+Resuming at generation 100 from /Users/andrey/code/doom-ml/debug/baseline_run/output/checkpoint.json
+generation 101/150 | testers 8 | best 46.7 | levels 0.0 | kills 2.5 | hp 0.0 | 13.4s
+  profile | gen 1.94s (eval 1.91s) | episode wall 13.11s: startup 8.15s (62.1%), rust 4.96s (policy 2.46s, sim 2.04s, killscan 0.14s)
+          sim | update 1.47s (29.6% of rust: enemy 0.68s, danger 0.50s, pickup 0.05s) | movement 0.15s | fire 0.11s
+generation 102/150 | testers 8 | best 1240.8 | levels 1.0 | kills 2.5 | hp 0.0 | 25.0s
+  profile | gen 1.46s (eval 1.43s) | episode wall 9.24s: startup 7.99s (86.4%), rust 1.26s (policy 0.52s, sim 0.57s, killscan 0.03s)
+          sim | update 0.45s (35.6% of rust: enemy 0.20s, danger 0.16s, pickup 0.02s) | movement 0.04s | fire 0.03s
+generation 103/150 | testers 8 | best 1810.9 | levels 1.5 | kills 2.0 | hp 0.0 | 28.3s
+  profile | gen 1.60s (eval 1.57s) | episode wall 10.63s: startup 8.15s (76.6%), rust 2.48s (policy 1.35s, sim 0.84s, killscan 0.07s)
+          sim | update 0.54s (21.8% of rust: enemy 0.21s, danger 0.14s, pickup 0.04s) | movement 0.10s | fire 0.06s
+generation 104/150 | testers 8 | best 657.0 | levels 0.5 | kills 1.0 | hp 0.0 | 23.9s
+  profile | gen 1.35s (eval 1.32s) | episode wall 8.75s: startup 7.90s (90.3%), rust 0.85s (policy 0.43s, sim 0.29s, killscan 0.02s)
+          sim | update 0.19s (22.3% of rust: enemy 0.07s, danger 0.06s, pickup 0.01s) | movement 0.03s | fire 0.02s
+generation 105/150 | testers 8 | best 83.3 | levels 0.0 | kills 4.5 | hp 0.0 | 26.7s
+  profile | gen 1.27s (eval 1.24s) | episode wall 8.28s: startup 8.04s (97.1%), rust 0.24s (policy 0.09s, sim 0.07s, killscan 0.00s)
+          sim | update 0.05s (23.1% of rust: enemy 0.02s, danger 0.02s, pickup 0.00s) | movement 0.01s | fire 0.00s
+generation 106/150 | testers 8 | best 647.2 | levels 0.5 | kills 2.0 | hp 0.0 | 35.2s
+  profile | gen 1.45s (eval 1.42s) | episode wall 9.37s: startup 8.24s (88.0%), rust 1.13s (policy 0.49s, sim 0.48s, killscan 0.03s)
+          sim | update 0.37s (33.1% of rust: enemy 0.16s, danger 0.15s, pickup 0.01s) | movement 0.03s | fire 0.02s
+generation 107/150 | testers 8 | best 1223.5 | levels 1.0 | kills 2.0 | hp 0.0 | 18.1s
+  profile | gen 1.35s (eval 1.32s) | episode wall 8.77s: startup 8.05s (91.8%), rust 0.72s (policy 0.31s, sim 0.30s, killscan 0.02s)
+          sim | update 0.23s (32.0% of rust: enemy 0.10s, danger 0.09s, pickup 0.01s) | movement 0.02s | fire 0.01s
+generation 108/150 | testers 8 | best 1198.6 | levels 1.0 | kills 2.0 | hp 39.5 | 413.7s
+  profile | gen 1.95s (eval 1.92s) | episode wall 13.04s: startup 8.81s (67.6%), rust 4.23s (policy 2.24s, sim 1.58s, killscan 0.10s)
+          sim | update 1.12s (26.5% of rust: enemy 0.47s, danger 0.36s, pickup 0.06s) | movement 0.15s | fire 0.09s
+generation 109/150 | testers 8 | best 1281.2 | levels 1.0 | kills 2.0 | hp 0.0 | 31.2s
+  profile | gen 1.73s (eval 1.70s) | episode wall 11.27s: startup 8.74s (77.5%), rust 2.53s (policy 1.33s, sim 0.90s, killscan 0.07s)
+          sim | update 0.60s (23.7% of rust: enemy 0.24s, danger 0.18s, pickup 0.04s) | movement 0.10s | fire 0.06s
+generation 110/150 | testers 8 | best 642.4 | levels 0.5 | kills 2.0 | hp 0.0 | 22.3s
+  profile | gen 1.60s (eval 1.57s) | episode wall 10.67s: startup 8.52s (79.8%), rust 2.15s (policy 1.01s, sim 0.91s, killscan 0.05s)
+          sim | update 0.68s (31.7% of rust: enemy 0.32s, danger 0.23s, pickup 0.03s) | movement 0.07s | fire 0.05s
+generation 111/150 | testers 8 | best 1225.3 | levels 1.0 | kills 2.5 | hp 0.0 | 34.9s
+  profile | gen 1.60s (eval 1.57s) | episode wall 10.14s: startup 8.81s (86.8%), rust 1.33s (policy 0.64s, sim 0.53s, killscan 0.03s)
+          sim | update 0.39s (29.6% of rust: enemy 0.17s, danger 0.14s, pickup 0.02s) | movement 0.04s | fire 0.03s
+generation 112/150 | testers 8 | best 1839.9 | levels 1.5 | kills 2.5 | hp 24.0 | 396.3s
+  profile | gen 1.78s (eval 1.75s) | episode wall 11.60s: startup 9.10s (78.5%), rust 2.50s (policy 1.07s, sim 1.15s, killscan 0.06s)
+          sim | update 0.88s (35.3% of rust: enemy 0.38s, danger 0.32s, pickup 0.03s) | movement 0.08s | fire 0.05s
+generation 113/150 | testers 8 | best 1199.3 | levels 1.0 | kills 2.0 | hp 0.0 | 90.7s
+  profile | gen 1.72s (eval 1.69s) | episode wall 11.16s: startup 8.96s (80.3%), rust 2.20s (policy 1.12s, sim 0.82s, killscan 0.06s)
+          sim | update 0.54s (24.7% of rust: enemy 0.22s, danger 0.17s, pickup 0.03s) | movement 0.09s | fire 0.05s
+generation 114/150 | testers 8 | best 618.1 | levels 0.5 | kills 1.5 | hp 36.0 | 383.7s
+  profile | gen 1.60s (eval 1.57s) | episode wall 10.32s: startup 8.87s (86.0%), rust 1.45s (policy 0.80s, sim 0.45s, killscan 0.03s)
+          sim | update 0.27s (19.0% of rust: enemy 0.09s, danger 0.07s, pickup 0.02s) | movement 0.06s | fire 0.03s
+generation 115/150 | testers 8 | best 625.4 | levels 0.5 | kills 1.5 | hp 0.0 | 14.6s
+  profile | gen 1.54s (eval 1.52s) | episode wall 10.03s: startup 8.90s (88.7%), rust 1.13s (policy 0.58s, sim 0.39s, killscan 0.03s)
+          sim | update 0.26s (22.9% of rust: enemy 0.10s, danger 0.08s, pickup 0.02s) | movement 0.04s | fire 0.03s
+generation 116/150 | testers 8 | best 63.9 | levels 0.0 | kills 3.5 | hp 0.0 | 24.5s
+  profile | gen 1.56s (eval 1.54s) | episode wall 10.21s: startup 8.91s (87.3%), rust 1.30s (policy 0.61s, sim 0.53s, killscan 0.03s)
+          sim | update 0.40s (30.6% of rust: enemy 0.18s, danger 0.14s, pickup 0.02s) | movement 0.04s | fire 0.03s
+generation 117/150 | testers 8 | best 663.2 | levels 0.5 | kills 3.5 | hp 0.0 | 23.2s
+  profile | gen 1.68s (eval 1.65s) | episode wall 11.07s: startup 9.19s (83.0%), rust 1.88s (policy 0.89s, sim 0.71s, killscan 0.06s)
+          sim | update 0.52s (27.9% of rust: enemy 0.22s, danger 0.18s, pickup 0.03s) | movement 0.06s | fire 0.03s
+generation 118/150 | testers 8 | best 654.1 | levels 0.5 | kills 3.0 | hp 0.0 | 19.6s
+  profile | gen 1.78s (eval 1.76s) | episode wall 12.06s: startup 9.19s (76.2%), rust 2.87s (policy 1.49s, sim 1.05s, killscan 0.08s)
+          sim | update 0.69s (24.1% of rust: enemy 0.26s, danger 0.20s, pickup 0.04s) | movement 0.10s | fire 0.07s
+generation 119/150 | testers 8 | best 643.9 | levels 0.5 | kills 2.0 | hp 0.0 | 20.6s
+  profile | gen 1.61s (eval 1.58s) | episode wall 10.75s: startup 9.24s (86.0%), rust 1.51s (policy 0.75s, sim 0.53s, killscan 0.04s)
+          sim | update 0.35s (23.3% of rust: enemy 0.12s, danger 0.11s, pickup 0.02s) | movement 0.05s | fire 0.04s
+generation 120/150 | testers 8 | best 613.2 | levels 0.5 | kills 0.5 | hp 0.0 | 27.2s
+  profile | gen 1.86s (eval 1.84s) | episode wall 12.41s: startup 9.20s (74.2%), rust 3.21s (policy 1.59s, sim 1.26s, killscan 0.09s)
+          sim | update 0.89s (27.8% of rust: enemy 0.38s, danger 0.28s, pickup 0.05s) | movement 0.12s | fire 0.07s
+generation 121/150 | testers 8 | best 1205.6 | levels 1.0 | kills 3.5 | hp 15.0 | 17.6s
+  profile | gen 1.52s (eval 1.49s) | episode wall 9.77s: startup 9.11s (93.2%), rust 0.66s (policy 0.35s, sim 0.20s, killscan 0.01s)
+          sim | update 0.14s (20.8% of rust: enemy 0.05s, danger 0.05s, pickup 0.01s) | movement 0.02s | fire 0.01s
+generation 122/150 | testers 8 | best 1221.1 | levels 1.0 | kills 2.5 | hp 0.0 | 27.5s
+  profile | gen 1.85s (eval 1.82s) | episode wall 12.34s: startup 9.23s (74.8%), rust 3.12s (policy 1.49s, sim 1.31s, killscan 0.08s)
+          sim | update 0.99s (31.7% of rust: enemy 0.43s, danger 0.36s, pickup 0.04s) | movement 0.10s | fire 0.06s
+generation 123/150 | testers 8 | best 629.1 | levels 0.5 | kills 1.5 | hp 0.0 | 15.7s
+  profile | gen 1.51s (eval 1.48s) | episode wall 9.92s: startup 9.10s (91.8%), rust 0.82s (policy 0.43s, sim 0.25s, killscan 0.02s)
+          sim | update 0.17s (20.8% of rust: enemy 0.06s, danger 0.06s, pickup 0.01s) | movement 0.03s | fire 0.02s
+generation 124/150 | testers 8 | best 1194.6 | levels 1.0 | kills 1.0 | hp 0.0 | 17.8s
+  profile | gen 1.52s (eval 1.49s) | episode wall 9.91s: startup 9.10s (91.8%), rust 0.81s (policy 0.45s, sim 0.22s, killscan 0.02s)
+          sim | update 0.15s (18.1% of rust: enemy 0.05s, danger 0.05s, pickup 0.01s) | movement 0.02s | fire 0.02s
+generation 125/150 | testers 8 | best 1772.4 | levels 1.5 | kills 2.5 | hp 0.0 | 22.3s
+  profile | gen 1.49s (eval 1.46s) | episode wall 9.54s: startup 9.16s (96.1%), rust 0.38s (policy 0.18s, sim 0.10s, killscan 0.01s)
+          sim | update 0.07s (18.6% of rust: enemy 0.02s, danger 0.03s, pickup 0.00s) | movement 0.01s | fire 0.01s
+generation 126/150 | testers 8 | best 577.9 | levels 0.5 | kills 1.5 | hp 0.0 | 40.4s
+  profile | gen 1.98s (eval 1.95s) | episode wall 13.46s: startup 9.34s (69.4%), rust 4.12s (policy 1.99s, sim 1.71s, killscan 0.10s)
+          sim | update 1.26s (30.6% of rust: enemy 0.54s, danger 0.44s, pickup 0.05s) | movement 0.14s | fire 0.08s
+generation 127/150 | testers 8 | best 663.6 | levels 0.5 | kills 2.0 | hp 0.0 | 33.6s
+  profile | gen 1.86s (eval 1.84s) | episode wall 12.61s: startup 9.27s (73.5%), rust 3.34s (policy 1.69s, sim 1.30s, killscan 0.09s)
+          sim | update 0.93s (27.8% of rust: enemy 0.39s, danger 0.29s, pickup 0.05s) | movement 0.11s | fire 0.07s
+generation 128/150 | testers 8 | best 1187.1 | levels 1.0 | kills 1.0 | hp 0.0 | 35.7s
+  profile | gen 1.77s (eval 1.74s) | episode wall 11.72s: startup 9.19s (78.4%), rust 2.53s (policy 1.25s, sim 0.99s, killscan 0.06s)
+          sim | update 0.72s (28.6% of rust: enemy 0.30s, danger 0.25s, pickup 0.03s) | movement 0.08s | fire 0.05s
+generation 129/150 | testers 8 | best 623.0 | levels 0.5 | kills 0.5 | hp 50.0 | 383.9s
+  profile | gen 1.91s (eval 1.88s) | episode wall 12.87s: startup 9.28s (72.1%), rust 3.59s (policy 1.83s, sim 1.37s, killscan 0.10s)
+          sim | update 0.96s (26.8% of rust: enemy 0.40s, danger 0.31s, pickup 0.05s) | movement 0.13s | fire 0.08s
+generation 130/150 | testers 8 | best 681.0 | levels 0.5 | kills 3.5 | hp 0.0 | 31.9s
+  profile | gen 1.76s (eval 1.73s) | episode wall 11.85s: startup 9.32s (78.6%), rust 2.53s (policy 1.18s, sim 1.06s, killscan 0.07s)
+          sim | update 0.80s (31.6% of rust: enemy 0.35s, danger 0.29s, pickup 0.03s) | movement 0.08s | fire 0.04s
+generation 131/150 | testers 8 | best 1798.0 | levels 1.5 | kills 3.0 | hp 12.0 | 396.2s
+  profile | gen 1.61s (eval 1.58s) | episode wall 10.64s: startup 9.06s (85.2%), rust 1.57s (policy 0.70s, sim 0.69s, killscan 0.04s)
+          sim | update 0.54s (34.1% of rust: enemy 0.25s, danger 0.19s, pickup 0.02s) | movement 0.05s | fire 0.03s
+generation 132/150 | testers 8 | best 631.1 | levels 0.5 | kills 2.5 | hp 0.0 | 31.5s
+  profile | gen 1.90s (eval 1.88s) | episode wall 12.73s: startup 9.17s (72.1%), rust 3.55s (policy 2.01s, sim 1.21s, killscan 0.08s)
+          sim | update 0.86s (24.1% of rust: enemy 0.34s, danger 0.30s, pickup 0.04s) | movement 0.11s | fire 0.07s
+generation 133/150 | testers 8 | best 19.6 | levels 0.0 | kills 1.5 | hp 43.0 | 385.7s
+  profile | gen 2.50s (eval 2.48s) | episode wall 17.56s: startup 9.41s (53.6%), rust 8.14s (policy 4.03s, sim 3.33s, killscan 0.22s)
+          sim | update 2.40s (29.5% of rust: enemy 1.00s, danger 0.81s, pickup 0.12s) | movement 0.27s | fire 0.18s
+generation 134/150 | testers 8 | best 643.3 | levels 0.5 | kills 3.0 | hp 0.0 | 31.0s
+  profile | gen 1.87s (eval 1.84s) | episode wall 12.61s: startup 9.15s (72.6%), rust 3.46s (policy 1.66s, sim 1.44s, killscan 0.09s)
+          sim | update 1.08s (31.2% of rust: enemy 0.46s, danger 0.38s, pickup 0.05s) | movement 0.12s | fire 0.07s
+generation 135/150 | testers 8 | best 1257.3 | levels 1.0 | kills 1.5 | hp 0.0 | 30.8s
+  profile | gen 1.64s (eval 1.62s) | episode wall 10.90s: startup 9.25s (84.9%), rust 1.65s (policy 0.79s, sim 0.66s, killscan 0.04s)
+          sim | update 0.50s (30.0% of rust: enemy 0.22s, danger 0.16s, pickup 0.02s) | movement 0.05s | fire 0.03s
+generation 136/150 | testers 8 | best 598.9 | levels 0.5 | kills 2.5 | hp 0.0 | 28.4s
+  profile | gen 1.60s (eval 1.58s) | episode wall 10.30s: startup 9.03s (87.7%), rust 1.27s (policy 0.63s, sim 0.45s, killscan 0.03s)
+          sim | update 0.32s (24.9% of rust: enemy 0.12s, danger 0.11s, pickup 0.02s) | movement 0.04s | fire 0.03s
+generation 137/150 | testers 8 | best 1202.2 | levels 1.0 | kills 2.0 | hp 0.0 | 35.1s
+  profile | gen 1.79s (eval 1.76s) | episode wall 11.99s: startup 9.02s (75.2%), rust 2.97s (policy 1.76s, sim 0.91s, killscan 0.07s)
+          sim | update 0.60s (20.2% of rust: enemy 0.22s, danger 0.19s, pickup 0.04s) | movement 0.10s | fire 0.06s
+generation 138/150 | testers 8 | best 1232.3 | levels 1.0 | kills 3.0 | hp 0.0 | 23.0s
+  profile | gen 1.61s (eval 1.58s) | episode wall 9.79s: startup 8.98s (91.7%), rust 0.81s (policy 0.48s, sim 0.21s, killscan 0.01s)
+          sim | update 0.13s (15.6% of rust: enemy 0.05s, danger 0.04s, pickup 0.01s) | movement 0.03s | fire 0.03s
+generation 139/150 | testers 8 | best 629.3 | levels 0.5 | kills 2.5 | hp 0.0 | 22.9s
+  profile | gen 2.08s (eval 2.05s) | episode wall 13.43s: startup 9.42s (70.1%), rust 4.01s (policy 2.07s, sim 1.46s, killscan 0.10s)
+          sim | update 0.99s (24.7% of rust: enemy 0.40s, danger 0.27s, pickup 0.09s) | movement 0.12s | fire 0.09s
+generation 140/150 | testers 8 | best 672.8 | levels 0.5 | kills 3.5 | hp 0.0 | 24.7s
+  profile | gen 2.06s (eval 2.02s) | episode wall 12.97s: startup 10.14s (78.2%), rust 2.83s (policy 1.73s, sim 0.81s, killscan 0.07s)
+          sim | update 0.56s (19.9% of rust: enemy 0.22s, danger 0.18s, pickup 0.06s) | movement 0.07s | fire 0.06s
+generation 141/150 | testers 8 | best 620.0 | levels 0.5 | kills 2.5 | hp 36.5 | 387.8s
+  profile | gen 1.92s (eval 1.89s) | episode wall 12.44s: startup 9.98s (80.2%), rust 2.46s (policy 1.52s, sim 0.63s, killscan 0.07s)
+          sim | update 0.39s (15.7% of rust: enemy 0.09s, danger 0.08s, pickup 0.03s) | movement 0.07s | fire 0.05s
+generation 142/150 | testers 8 | best 27.9 | levels 0.0 | kills 1.5 | hp 46.5 | 380.4s
+  profile | gen 2.44s (eval 2.40s) | episode wall 16.34s: startup 9.64s (59.0%), rust 6.70s (policy 3.21s, sim 2.92s, killscan 0.16s)
+          sim | update 2.28s (34.0% of rust: enemy 1.02s, danger 0.83s, pickup 0.10s) | movement 0.19s | fire 0.14s
+generation 143/150 | testers 8 | best 623.2 | levels 0.5 | kills 1.5 | hp 0.0 | 19.2s
+  profile | gen 3.13s (eval 3.08s) | episode wall 21.71s: startup 13.97s (64.4%), rust 7.74s (policy 3.31s, sim 3.59s, killscan 0.35s)
+          sim | update 3.01s (38.9% of rust: enemy 1.27s, danger 1.30s, pickup 0.07s) | movement 0.17s | fire 0.11s
+generation 144/150 | testers 8 | best 575.3 | levels 0.5 | kills 1.5 | hp 0.0 | 62.9s
+  profile | gen 1.98s (eval 1.94s) | episode wall 12.68s: startup 11.61s (91.6%), rust 1.07s (policy 0.49s, sim 0.39s, killscan 0.03s)
+          sim | update 0.29s (27.1% of rust: enemy 0.12s, danger 0.10s, pickup 0.01s) | movement 0.03s | fire 0.03s
+generation 145/150 | testers 8 | best 24.7 | levels 0.0 | kills 1.5 | hp 0.0 | 21.3s
+  profile | gen 2.76s (eval 2.71s) | episode wall 18.74s: startup 12.70s (67.8%), rust 6.04s (policy 3.07s, sim 2.41s, killscan 0.15s)
+          sim | update 1.71s (28.4% of rust: enemy 0.73s, danger 0.48s, pickup 0.11s) | movement 0.19s | fire 0.14s
+generation 146/150 | testers 8 | best 622.3 | levels 0.5 | kills 2.0 | hp 0.0 | 26.8s
+  profile | gen 2.25s (eval 2.21s) | episode wall 13.86s: startup 11.41s (82.3%), rust 2.45s (policy 1.08s, sim 1.09s, killscan 0.06s)
+          sim | update 0.80s (32.8% of rust: enemy 0.36s, danger 0.30s, pickup 0.03s) | movement 0.08s | fire 0.05s
+generation 147/150 | testers 8 | best 616.6 | levels 0.5 | kills 0.5 | hp 0.0 | 13.5s
+  profile | gen 2.20s (eval 2.15s) | episode wall 13.71s: startup 12.01s (87.6%), rust 1.70s (policy 0.80s, sim 0.62s, killscan 0.06s)
+          sim | update 0.39s (23.0% of rust: enemy 0.11s, danger 0.19s, pickup 0.02s) | movement 0.04s | fire 0.03s
+generation 148/150 | testers 8 | best 1252.2 | levels 1.0 | kills 3.0 | hp 0.0 | 23.3s
+  profile | gen 1.54s (eval 1.50s) | episode wall 9.76s: startup 9.33s (95.6%), rust 0.43s (policy 0.19s, sim 0.13s, killscan 0.01s)
+          sim | update 0.10s (22.2% of rust: enemy 0.04s, danger 0.04s, pickup 0.00s) | movement 0.01s | fire 0.01s
+generation 149/150 | testers 8 | best 606.1 | levels 0.5 | kills 2.5 | hp 28.0 | 391.6s
+  profile | gen 2.49s (eval 2.44s) | episode wall 16.66s: startup 9.54s (57.3%), rust 7.12s (policy 3.23s, sim 3.32s, killscan 0.16s)
+          sim | update 2.62s (36.7% of rust: enemy 1.21s, danger 0.98s, pickup 0.08s) | movement 0.22s | fire 0.13s
+generation 150/150 | testers 8 | best 611.3 | levels 0.5 | kills 1.0 | hp 0.0 | 18.6s
+  profile | gen 2.17s (eval 2.13s) | episode wall 14.46s: startup 11.12s (76.9%), rust 3.34s (policy 1.93s, sim 1.11s, killscan 0.07s)
+          sim | update 0.83s (25.0% of rust: enemy 0.32s, danger 0.28s, pickup 0.03s) | movement 0.07s | fire 0.09s
+profile summary | 50 generations in 91.20s | episode CPU 600.13s | startup 469.00s (78.1%) | rust 131.13s | policy 65.27s | sim 51.33s
+DOOM_PROFILE=1 python3 baseline_run/train.py --config baseline_run/config.jso  495.36s user 122.42s system 676% cpu 1:31.33 total

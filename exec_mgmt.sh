@@ -40,7 +40,8 @@ executable="target/release/doom" # Remember that this script is running in Doom-
 
 
 if "$build"; then
-	cargo build -r --bins
+	cargo build -r --bin doom
+	cargo build -r --bin doom_headless --no-default-features
 fi
 
 if "$run"; then

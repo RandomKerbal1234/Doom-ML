@@ -1,0 +1,3 @@
+Note to self: continue work on optimization, get x3755 back to ~85% cpu usage from ~20%. Also, investige seeming lack of machine learning (cyclical nature?).
+
+Also, make campaign levels set actual amount of levels used, starting from first level (if = 25, use first 25 levels).

@@ -53,10 +53,10 @@
     "time_step_seconds": 0.05
   },
   "config_hash": "a2462252aa115f167eb38f71ed63d963cd86d0de431943044f86df6fc52a2327",
-  "created_at": "2026-11-16T18:06:11.566270+00:00",
+  "created_at": "2026-11-16T21:10:54.863469+00:00",
   "executable": "/home/ml/Doom-ML/doom/target/release/doom_headless",
   "executable_sha256": "74daef85d59d12add491cbca7bc2ff086a036d14b6c796eade680967cac6f9d5",
-  "git_commit": "7f14e23b8e33a12ec9e30717c6e0d983a8c8bbab",
+  "git_commit": "8083feb0e24f49da6ef26de391f974c1b454de34",
   "git_dirty": true,
   "python_version": "3.15.2",
   "resume": {
@@ -64,9 +64,9 @@
     "enabled": true,
     "loaded_checkpoint": false
   },
-  "run_id": "642344560-a2462252aa11-20261116T180611533887Z",
+  "run_id": "642344560-a2462252aa11-20261116T211054794708Z",
   "rust_version": "rustc 1.99.1 (58cf8f9c3 2026-10-13) (Fedora 1.99.1-2.fc45)",
   "seed": 642344560,
   "status": "completed",
-  "updated_at": "2026-11-16T18:27:14.797511+00:00"
+  "updated_at": "2026-11-16T21:31:29.020855+00:00"
 }

@@ -5,6 +5,24 @@ use crate::settings::{DifficultyPreset, GameSettings, SettingKey};
 use crate::{HEIGHT, WIDTH};
 use std::time::Instant;
 
+/// Number of wall rays sampled by the policy. Mirrored in `training/env.py`.
+pub(crate) const RAY_COUNT: usize = 12;
+/// Leaky-integrator coefficient for the recurrent wall-ray memory.
+const RAY_MEMORY_DECAY: f32 = 0.75;
+/// Previous-action feedback width: turn, forward, strafe, fire, exit, run.
+const ACTION_MEMORY: usize = 6;
+/// Total policy input width. Mirrored in `training/env.py`.
+///
+/// Layout: rays(12) enemies(10) pickup(9) exit(3) health+armor(2) ammo(4)
+/// unlocked(4) weapon+time(2) ray_memory(12) action_memory(6).
+pub(crate) const POLICY_INPUTS: usize = RAY_COUNT + 10 + 9 + 3 + 2 + 4 + 4 + 2
+    + RAY_COUNT
+    + ACTION_MEMORY;
+/// Policy output width. Mirrored in `training/env.py`.
+pub(crate) const POLICY_OUTPUTS: usize = 10;
+/// Upper bound on a single layer's width; only bounds the stack scratch.
+const MAX_POLICY_WIDTH: usize = 128;
+
 /// Accumulated timings for the headless trainer. Every value is nanoseconds.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct GameProfile {
@@ -69,6 +87,120 @@ pub(crate) enum SpriteKind {
     Exit,
 }
 
+/// Leaky recurrent state fed back into the policy. Reset per episode.
+#[derive(Clone, Copy)]
+pub(crate) struct PolicyMemory {
+    rays: [f32; RAY_COUNT],
+    action: [f32; ACTION_MEMORY],
+}
+
+impl PolicyMemory {
+    const fn new() -> Self {
+        Self {
+            rays: [0.0; RAY_COUNT],
+            action: [0.0; ACTION_MEMORY],
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
+/// A flat-weight multilayer perceptron with `tanh` activations.
+///
+/// The shape (`[inputs, hidden..., outputs]`) is data, not code, so adding or
+/// resizing hidden layers only changes the shape passed in from the trainer.
+///
+/// Weight layout is layer-major and mirrors `training/env.py`: for each layer,
+/// every output neuron stores its `fan_in` input weights followed by its bias.
+pub(crate) struct Policy {
+    shape: Vec<usize>,
+    offsets: Vec<usize>,
+    weights: Vec<f32>,
+}
+
+impl Policy {
+    /// Total weight count for a shape, including one bias per neuron.
+    pub(crate) fn parameters(shape: &[usize]) -> usize {
+        shape.windows(2).map(|pair| pair[1] * (pair[0] + 1)).sum()
+    }
+
+    pub(crate) fn new(shape: &[usize], weights: Vec<f32>) -> Result<Self, String> {
+        if shape.len() < 2 {
+            return Err("policy shape needs at least an input and an output layer".into());
+        }
+        if shape[0] != POLICY_INPUTS {
+            return Err(format!(
+                "policy shape must start with {POLICY_INPUTS} inputs, got {}",
+                shape[0]
+            ));
+        }
+        if shape[shape.len() - 1] != POLICY_OUTPUTS {
+            return Err(format!(
+                "policy shape must end with {POLICY_OUTPUTS} outputs, got {}",
+                shape[shape.len() - 1]
+            ));
+        }
+        if let Some(width) = shape.iter().find(|&&w| w == 0 || w > MAX_POLICY_WIDTH) {
+            return Err(format!(
+                "policy layer widths must be in 1..={MAX_POLICY_WIDTH}, got {width}"
+            ));
+        }
+        let expected = Self::parameters(shape);
+        if weights.len() != expected {
+            return Err(format!(
+                "expected {expected} policy weights for shape {shape:?}, got {}",
+                weights.len()
+            ));
+        }
+        let mut offsets = Vec::with_capacity(shape.len() - 1);
+        let mut cursor = 0;
+        for pair in shape.windows(2) {
+            offsets.push(cursor);
+            cursor += pair[1] * (pair[0] + 1);
+        }
+        Ok(Self {
+            shape: shape.to_vec(),
+            offsets,
+            weights,
+        })
+    }
+
+    /// Weight count of the constructed network.
+    #[allow(dead_code)] // Used by the policy-format test in main.rs.
+    pub(crate) fn weight_count(&self) -> usize {
+        self.weights.len()
+    }
+
+    /// Runs one forward pass. Uses fixed stack scratch so there is no
+    /// allocation on the per-step path.
+    pub(crate) fn forward(&self, inputs: &[f32; POLICY_INPUTS]) -> [f32; POLICY_OUTPUTS] {
+        let mut current = [0.0f32; MAX_POLICY_WIDTH];
+        let mut next = [0.0f32; MAX_POLICY_WIDTH];
+        current[..POLICY_INPUTS].copy_from_slice(inputs);
+        for (layer, pair) in self.shape.windows(2).enumerate() {
+            let (fan_in, fan_out) = (pair[0], pair[1]);
+            let base = self.offsets[layer];
+            for out in 0..fan_out {
+                let start = base + out * (fan_in + 1);
+                let mut sum = self.weights[start + fan_in];
+                for (weight, value) in self.weights[start..start + fan_in]
+                    .iter()
+                    .zip(current[..fan_in].iter())
+                {
+                    sum += weight * value;
+                }
+                next[out] = sum.tanh();
+            }
+            current[..fan_out].copy_from_slice(&next[..fan_out]);
+        }
+        let mut output = [0.0f32; POLICY_OUTPUTS];
+        output.copy_from_slice(&current[..POLICY_OUTPUTS]);
+        output
+    }
+}
+
 pub(crate) struct Game {
     pub(crate) level_index: usize,
     pub(crate) selected_level: usize,
@@ -122,6 +254,7 @@ pub(crate) struct Game {
     pub(crate) pixels: Vec<u8>,
     pub(crate) z_buffer: [f32; WIDTH],
     pub(crate) wall_grid: [bool; MAP_WIDTH * MAP_HEIGHT],
+    pub(crate) policy_memory: PolicyMemory,
 }
 
 impl Game {
@@ -174,6 +307,7 @@ impl Game {
             pixels: vec![0; WIDTH * HEIGHT * 4],
             z_buffer: [0.0; WIDTH],
             wall_grid: [true; MAP_WIDTH * MAP_HEIGHT],
+            policy_memory: PolicyMemory::new(),
         };
         game.ammo[0] = game.settings.starting_pistol_ammo.round() as i32;
         game.load_level(0);
@@ -257,6 +391,7 @@ impl Game {
         self.settings_open = false;
         self.selected_level = first_level;
         self.kills = 0;
+        self.policy_memory.reset();
         self.reset_agent_stats();
         self.load_level(first_level);
     }
@@ -437,31 +572,74 @@ impl Game {
         )
     }
 
-    /// Computes the same normalized 42-value input vector used by training/env.py.
-    pub(crate) fn agent_policy_action(
-        &self,
-        weights: &[f32],
-    ) -> (f32, f32, f32, bool, bool, usize, bool) {
-        const INPUTS: usize = 42;
-        const OUTPUTS: usize = 10;
-        let width = INPUTS + 1;
-        if weights.len() != OUTPUTS * width {
-            return (0.0, 0.0, 0.0, false, false, 0, true);
-        }
-        let mut values = [0.0f32; INPUTS];
-        let mut n = 0usize;
-        for ray in 0..8 {
-            let direction = self.angle + ray as f32 * std::f32::consts::TAU / 8.0;
-            let mut distance = 0.0;
-            for k in 1..=80 {
-                distance = k as f32 * 0.1;
-                let sx = (self.x + direction.cos() * distance) as i32;
-                let sy = (self.y + direction.sin() * distance) as i32;
-                if self.is_wall(sx, sy) {
-                    break;
-                }
+    /// Distance to the first solid tile along `angle`, normalized to [0, 1].
+    ///
+    /// Uses an Amanatides-Woo grid traversal in f64 so the result is exact and
+    /// matches `training/env.py::_ray_distance`. A fixed 0.1-tile march cost
+    /// up to 80 lookups per ray and dominated the per-step budget once the
+    /// encoder grew to twelve rays.
+    fn ray_distance(&self, angle: f32) -> f32 {
+        const RAY_MAX_DISTANCE: f64 = 8.0;
+        let origin_x = self.x as f64;
+        let origin_y = self.y as f64;
+        let direction_x = (angle as f64).cos();
+        let direction_y = (angle as f64).sin();
+        let mut cell_x = origin_x.floor() as i64;
+        let mut cell_y = origin_y.floor() as i64;
+        let delta_x = if direction_x == 0.0 {
+            f64::INFINITY
+        } else {
+            (1.0 / direction_x).abs()
+        };
+        let delta_y = if direction_y == 0.0 {
+            f64::INFINITY
+        } else {
+            (1.0 / direction_y).abs()
+        };
+        let (step_x, side_x) = if direction_x < 0.0 {
+            (-1i64, (origin_x - cell_x as f64) * delta_x)
+        } else {
+            (1i64, ((cell_x + 1) as f64 - origin_x) * delta_x)
+        };
+        let (step_y, side_y) = if direction_y < 0.0 {
+            (-1i64, (origin_y - cell_y as f64) * delta_y)
+        } else {
+            (1i64, ((cell_y + 1) as f64 - origin_y) * delta_y)
+        };
+        let (mut side_x, mut side_y) = (side_x, side_y);
+        let mut distance = 0.0f64;
+        while distance <= RAY_MAX_DISTANCE {
+            if side_x < side_y {
+                distance = side_x;
+                side_x += delta_x;
+                cell_x += step_x;
+            } else {
+                distance = side_y;
+                side_y += delta_y;
+                cell_y += step_y;
             }
-            values[n] = (distance / 8.0).min(1.0);
+            if cell_x < 0
+                || cell_y < 0
+                || cell_x >= MAP_WIDTH as i64
+                || cell_y >= MAP_HEIGHT as i64
+            {
+                break;
+            }
+            if self.wall_grid[cell_y as usize * MAP_WIDTH + cell_x as usize] {
+                break;
+            }
+        }
+        (distance.min(RAY_MAX_DISTANCE) / RAY_MAX_DISTANCE) as f32
+    }
+
+    /// Builds the normalized policy input vector. `training/env.py::observe`
+    /// computes the same values in the same order.
+    pub(crate) fn agent_inputs(&self) -> [f32; POLICY_INPUTS] {
+        let mut values = [0.0f32; POLICY_INPUTS];
+        let mut n = 0usize;
+        let ray_step = std::f32::consts::TAU / RAY_COUNT as f32;
+        for ray in 0..RAY_COUNT {
+            values[n] = self.ray_distance(self.angle + ray as f32 * ray_step);
             n += 1;
         }
 
@@ -559,18 +737,29 @@ impl Game {
         values[n] = self.weapon as f32 / 3.0;
         values[n + 1] = (self.time / 120.0).min(1.0);
         n += 2;
-        debug_assert_eq!(n, INPUTS);
 
-        let mut output = [0.0f32; OUTPUTS];
-        for (out, value) in output.iter_mut().enumerate() {
-            let start = out * width;
-            let row = &weights[start..start + INPUTS];
-            let mut sum = weights[start + INPUTS];
-            for (weight, input) in row.iter().zip(values.iter()) {
-                sum += weight * input;
-            }
-            *value = sum.tanh();
+        // Recurrent block: leaky wall memory plus the previous action.
+        for ray in 0..RAY_COUNT {
+            values[n] = self.policy_memory.rays[ray];
+            n += 1;
         }
+        for action in 0..ACTION_MEMORY {
+            values[n] = self.policy_memory.action[action];
+            n += 1;
+        }
+        debug_assert_eq!(n, POLICY_INPUTS);
+        values
+    }
+
+    /// Maps the current state to an action with the supplied policy, then
+    /// advances the recurrent memory. `training/env.py::choose_action` mirrors
+    /// this exactly.
+    pub(crate) fn agent_policy_action(
+        &mut self,
+        policy: &Policy,
+    ) -> (f32, f32, f32, bool, bool, usize, bool) {
+        let values = self.agent_inputs();
+        let output = policy.forward(&values);
         let mut weapon = (0..4)
             .find(|&candidate| self.unlocked[candidate])
             .unwrap_or(0);
@@ -579,7 +768,7 @@ impl Game {
                 weapon = candidate;
             }
         }
-        (
+        let action = (
             output[0],
             output[1],
             output[2],
@@ -587,7 +776,20 @@ impl Game {
             output[4] > 0.0,
             weapon,
             output[9] > 0.0,
-        )
+        );
+        self.policy_memory.action = [
+            action.0,
+            action.1,
+            action.2,
+            action.3 as u8 as f32,
+            action.4 as u8 as f32,
+            action.6 as u8 as f32,
+        ];
+        for ray in 0..RAY_COUNT {
+            let memory = &mut self.policy_memory.rays[ray];
+            *memory = *memory * RAY_MEMORY_DECAY + values[ray] * (1.0 - RAY_MEMORY_DECAY);
+        }
+        action
     }
 
     pub(crate) fn toggle_settings(&mut self) {

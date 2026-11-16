@@ -24,7 +24,7 @@ use levels::initialize_levels;
 use ui::{draw_overlay, draw_settings_overlay};
 
 struct AgentPolicy {
-    weights: Vec<f32>,
+    network: game::Policy,
     generation: usize,
     difficulty: String,
     modified: SystemTime,
@@ -50,6 +50,17 @@ fn load_agent_policy(path: &Path) -> Result<AgentPolicy, String> {
         .and_then(|value| value.split('"').next())
         .unwrap_or("medium")
         .to_string();
+    let shape = policy_value(&source, "policy_shape")
+        .and_then(|value| value.strip_prefix('"'))
+        .and_then(|value| value.split('"').next())
+        .ok_or("missing policy_shape")?
+        .split(',')
+        .map(|item| {
+            item.trim()
+                .parse::<usize>()
+                .map_err(|_| "invalid policy_shape".to_string())
+        })
+        .collect::<Result<Vec<usize>, _>>()?;
     let weight_text = policy_value(&source, "weights")
         .and_then(|value| value.strip_prefix('['))
         .and_then(|value| value.split(']').next())
@@ -63,14 +74,12 @@ fn load_agent_policy(path: &Path) -> Result<AgentPolicy, String> {
                 .map_err(|_| "invalid weight".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if weights.len() != 430 {
-        return Err(format!("expected 430 weights, found {}", weights.len()));
-    }
+    let network = game::Policy::new(&shape, weights)?;
     let modified = fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .map_err(|error| error.to_string())?;
     Ok(AgentPolicy {
-        weights,
+        network,
         generation,
         difficulty,
         modified,
@@ -173,7 +182,7 @@ async fn main() {
                     completed_levels = 0;
                 } else {
                     let previous_level = game.level_index;
-                    let action = game.agent_policy_action(&policy.weights);
+                    let action = game.agent_policy_action(&policy.network);
                     game.agent_step(
                         action.0, action.1, action.2, action.3, action.4, action.5, action.6, dt,
                     );
@@ -233,5 +242,43 @@ async fn main() {
             draw_text(&status, 12.0, 20.0, 16.0, Color::new(1.0, 0.82, 0.48, 1.0));
         }
         next_frame().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy_file(name: &str, text: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(name);
+        fs::write(&path, text).unwrap();
+        path
+    }
+
+    /// The watcher parses `best_policy.json` by string search, so the shape and
+    /// weight plumbing still needs a direct check.
+    #[test]
+    fn loads_shape_and_weights() {
+        let weights = (0..160)
+            .map(|index| format!("{:.3}", index as f32 * 0.01))
+            .collect::<Vec<_>>()
+            .join(",");
+        let text = format!(
+            "{{\n  \"architecture\": {{\"inputs\": 64, \"hidden_layers\": [2], \"outputs\": 10}},\n  \
+             \"doom_difficulty\": \"easy\",\n  \"generation\": 7,\n  \
+             \"policy_shape\": \"64,2,10\",\n  \"result\": {{}},\n  \"weights\": [{weights}]\n}}"
+        );
+        let path = policy_file("doom-policy-ok.json", &text);
+        let policy = load_agent_policy(&path).expect("policy should load");
+        assert_eq!(policy.generation, 7);
+        assert_eq!(policy.difficulty, "easy");
+        assert_eq!(policy.network.weight_count(), 160);
+    }
+
+    #[test]
+    fn rejects_missing_shape() {
+        let text = "{\"generation\": 1, \"weights\": [0,0,0]}";
+        let path = policy_file("doom-policy-bad.json", text);
+        assert!(load_agent_policy(&path).is_err());
     }
 }

@@ -10,6 +10,12 @@
 > tree may contain local changes; check `git status` before assuming a clean
 > checkout. The `debug/` directory is a historical benchmark copy, not the live
 > code.
+>
+> On top of that snapshot, the `two-layer-alg` branch replaces the fixed
+> 42→10 linear policy with a **configurable `tanh` MLP** (default 64→16→8→10,
+> 1266 weights), adds **recurrent policy inputs**, switches rays to exact grid
+> traversal, and changes initialization/mutation scaling. Sections marked
+> *MLP* describe that state.
 
 **Contents:** [1. What this is](#1-what-this-project-is) ·
 [2. Repo map](#2-repository-map) · [3. Quick start](#3-quick-start) ·
@@ -25,10 +31,11 @@ Doom-ML is a self-contained machine-learning experiment:
 
 - A small, asset-free **DOOM-like first-person shooter** written in Rust
   (320×200 software raycaster, `macroquad` window).
-- A **Python evolutionary trainer** that learns a tiny linear policy to play
+- A **Python evolutionary trainer** that learns a tiny policy to play
   the game. There is no neural-network library, no gradients, and no external
-  ML dependency. The policy is a flat vector of **430 floats** evolved by
-  mutation and selection.
+  ML dependency. The policy is a flat weight vector evolved by mutation and
+  selection: a `tanh` MLP whose shape comes from `config.json`
+  (`hidden_layers`), **1266 floats** for the default 64→16→8→10 shape.
 - A 50-level campaign embedded in the binaries from editable `.lvl` files.
 - A 13-term reward function covering level completion, exit progress, combat,
   survival, resource use, and death. See §7.4.
@@ -140,7 +147,7 @@ config.json
    ▼
 training/train.py
    │  validate config, resolve executable, hash config + executable
-   │  population of 430-float genomes (or checkpoint population)
+   │  population of parameter_count(shape)-float genomes (or checkpoint)
    │  for each generation:
    │    seeds = seed + generation * evaluation_episodes + i
    │    jobs  = genome × seed
@@ -155,7 +162,7 @@ training/env.py :: Evaluator.evaluate(genome, cfg, seed)
    │      -> random.Random(seed).randrange(low - 1, high)
    │  writes one job line to the server's stdin:
    │      start_level,difficulty,dt,max_steps,max_levels_per_agent
-   │      + 13 fitness weights + 430 policy weights
+   │      + 13 fitness weights + parameter_count(shape) policy weights
    ▼
 doom/src/bin/doom_headless.rs :: evaluate_server() -> run_episode()
    │  one reused Game; agent_start(start_level, difficulty) resets episode state
@@ -248,10 +255,11 @@ transitions or on death.
   (relative to the current working directory; `watch_agent.sh` changes to the
   repo root first).
 - The policy loader is a **naive string parser**, not a JSON library: it finds
-  the first `"generation"`, `"doom_difficulty"`, and `"weights"` keys and
-  parses their values. It only supports the exact file shape emitted by
-  `train.py`, and requires exactly 430 weights. It ignores all other keys, so
-  the extra provenance fields in `best_policy.json` are harmless.
+  the first `"generation"`, `"doom_difficulty"`, `"policy_shape"`, and
+  `"weights"` keys and parses their values. It only supports the exact file
+  shape emitted by `train.py`; the flat weight array length must match the
+  parsed `policy_shape`. It ignores all other keys, so the extra provenance
+  fields in `best_policy.json` are harmless.
 - Reload behavior: the file is polled every 0.5 s. If only weights/generation
   change, the current episode continues with new weights. If the difficulty
   changes (or no policy was loaded before), a new random-level episode starts.
@@ -292,7 +300,8 @@ Player state (`Game`):
 - Renderer: `pixels: Vec<u8>` (RGBA, 320×200×4), `z_buffer: [f32; 320]`
 - Optimization/headless state: `kills: u64`, `wall_grid:
   [bool; MAP_WIDTH * MAP_HEIGHT]`, `profiling`, `profile: GameProfile`,
-  `track_danger`, `visual_effects`
+  `track_danger`, `visual_effects`, `policy_memory: PolicyMemory` (recurrent
+  policy inputs, reset per episode)
 - `time` accumulates simulation time. `agent_start` resets it (and all timers,
   hit effects, profile counters, and agent statistics), so a reused
   `--evaluate-server` `Game` is equivalent to a fresh one. `start_new_run` and
@@ -405,22 +414,32 @@ Optimization/headless behavior:
 Used by both the headless evaluator and the GUI watcher:
 
 - `agent_start(first_level, preset)` — apply easy/medium/hard settings, start a
-  fresh run at `first_level % 50`.
+  fresh run at `first_level % 50`. Resets `time`, timers, hit effects, profile
+  counters, agent statistics, and the recurrent `policy_memory`.
 - `agent_step(turn, forward, strafe, fire, activate_exit, weapon, run, dt)` —
   clamp `dt` to 0.05, select weapon if unlocked, turn, move, optionally use the
   exit, optionally fire, then call `update(dt)`. It is a no-op when
   dead/won/paused/settings-open.
 - `agent_observation() -> String` — one-line JSON observation (see §7.7).
-- `agent_policy_action(weights) -> (turn, forward, strafe, fire,
-  activate_exit, weapon, run)` — computes the 42-value input vector, applies
-  the linear policy, and decodes 10 tanh outputs. If `weights.len() != 430`,
-  it returns a no-op action `(0, 0, 0, false, false, 0, true)`. The optimized
-  implementation builds the inputs in a fixed `[f32; 42]`, finds the two
-  nearest enemies and nearest pickup in one pass, uses the wall grid for rays,
-  and does slice-based dot products; outputs are unchanged.
+- `agent_inputs(&self) -> [f32; POLICY_INPUTS]` — builds the 64-value input
+  vector (§7.2). Pure; does not touch the recurrent state.
+- `agent_policy_action(&mut self, policy: &Policy) -> (turn, forward, strafe,
+  fire, activate_exit, weapon, run)` — calls `agent_inputs`, runs the network,
+  decodes 10 `tanh` outputs, then **advances the recurrent memory** (§7.2). The
+  `&mut` receiver exists for that memory update. There is no weight-count check
+  here: `Policy::new` validates the shape and length once when the policy is
+  built, and reports `expected N policy weights for shape …` on mismatch. The
+  optimized `agent_inputs` builds a fixed `[f32; 64]`, finds the two nearest
+  enemies and nearest pickup in one pass, and uses exact grid-traversal rays.
 
-The 42-input encoder and 10-output decoder are duplicated in
-`training/env.py`; they must stay in sync. See §7.2.
+The `Policy` type in `game.rs` is shared by the GUI and headless binaries. Its
+shape (`[inputs, hidden…, outputs]`) is data; `Policy::new(shape, weights)`
+validates the shape and weight count, and `Policy::forward` runs the network
+with fixed stack scratch (no per-step allocation). Weight layout is described in
+§7.1.
+
+The 64-input encoder and the forward pass are duplicated in `training/env.py`;
+they must stay in sync. See §7.2.
 
 ### 5.5 Renderer (`render.rs`)
 
@@ -565,14 +584,24 @@ Rules enforced by `levels.rs`:
 
 ### 7.1 Policy representation
 
-- Architecture: **42 inputs → 10 outputs**, fully connected, linear + bias,
-  `tanh` activation. No hidden layer.
-- Weights are output-major: for each output, 42 input weights followed by one
-  bias. Total `10 * (42 + 1) = 430`.
-- The same 430-float vector is used by Python and Rust. The parameter count is
-  hard-coded in several places (see §9).
-- `best_policy.json` architecture metadata is
-  `{"inputs": 42, "outputs": 10, "activation": "tanh-linear"}`.
+- Architecture: a fully connected `tanh` MLP whose **shape is data**.
+  `config.json`'s `hidden_layers` lists the hidden widths; the full shape is
+  `[64, *hidden_layers, 10]`. Default `[16, 8]` → **64 → 16 → 8 → 10**,
+  **1266 weights**. An empty list reproduces the original single-layer linear
+  policy.
+- Parameter count for a shape: `sum(fan_out * (fan_in + 1))`, i.e. one bias per
+  neuron. `64→16→8→10` = `16*65 + 8*17 + 10*9` = 1040 + 136 + 90 = 1266.
+- **Weight layout is layer-major**: for each layer in input→output order, and
+  for each output neuron in index order, store its `fan_in` input weights
+  followed by its bias. For a single layer this reduces to the old
+  output-major layout.
+- `training/env.py::forward_policy` and `doom/src/game.rs::Policy::forward`
+  implement this independently and must stay numerically equivalent.
+- `best_policy.json` carries both a human-readable `architecture` object
+  (`inputs`, `hidden_layers`, `outputs`, `activation`, `layout`) and a
+  machine-readable `"policy_shape": "64,16,8,10"` string that the GUI's naive
+  parser reads. Neither key contains the substring `"weights"`, which matters
+  (§9.10).
 
 Output → action mapping (indices 0–9):
 
@@ -586,32 +615,57 @@ Output → action mapping (indices 0–9):
 | 5–8 | weapon preference scores; choose the highest among unlocked weapons (ties choose the lowest index) |
 | 9 | run if `> 0` |
 
-### 7.2 Input vector (42 values)
+### 7.2 Input vector (64 values)
 
-Computed by `training/env.py::encode_observation` and independently by
-`Game::agent_policy_action` in `game.rs`. **These two implementations must stay
-in sync.**
+Computed by `training/env.py::observe` and independently by
+`Game::agent_inputs` in `game.rs`. **These two implementations must stay in
+sync.** The width constants (`RAY_COUNT = 12`, `ACTION_MEMORY = 6`,
+`POLICY_INPUTS = 64`) are duplicated as well.
 
 | Index range | Count | Values |
 | --- | ---: | --- |
-| 0–7 | 8 | Ray distances at `angle + i*2π/8`; step 0.1 up to 8.0 tiles; stop on wall/out-of-bounds; `min(distance/8, 1)` |
-| 8–17 | 10 | Two nearest living enemies: `sin(bearing)`, `cos(bearing)`, `min(dist/12,1)`, `min(hp/200,1)`, `kind` (0/1); missing enemy = `0,0,1,0,0` |
-| 18–26 | 9 | Nearest active pickup: `sin(bearing)`, `cos(bearing)`, `min(dist/12,1)`, one-hot `[shotgun, chaingun, rocket_launcher, medkit, armor, ammo]`; missing pickup = `0,0,1,0,0,0,0,0,0` |
-| 27–29 | 3 | Exit: `sin(bearing)`, `cos(bearing)`, `min(dist/16,1)` |
-| 30–31 | 2 | `health/200`, `armor/200` |
-| 32–35 | 4 | `clamp(ammo,0,100)/100` for pistol, shotgun, chaingun, rockets |
-| 36–39 | 4 | Unlocked flags as 1/0 |
-| 40–41 | 2 | `weapon/3`, `min(time/120,1)` |
+| 0–11 | 12 | Ray distances at `angle + i*2π/12`; exact grid traversal up to 8.0 tiles; stop on a solid tile or out-of-bounds; `min(distance/8, 1)` |
+| 12–21 | 10 | Two nearest living enemies: `sin(bearing)`, `cos(bearing)`, `min(dist/12,1)`, `min(hp/200,1)`, `kind` (0/1); missing enemy = `0,0,1,0,0` |
+| 22–30 | 9 | Nearest active pickup: `sin(bearing)`, `cos(bearing)`, `min(dist/12,1)`, one-hot `[shotgun, chaingun, rocket_launcher, medkit, armor, ammo]`; missing pickup = `0,0,1,0,0,0,0,0,0` |
+| 31–33 | 3 | Exit: `sin(bearing)`, `cos(bearing)`, `min(dist/16,1)` |
+| 34–35 | 2 | `health/200`, `armor/200` |
+| 36–39 | 4 | `clamp(ammo,0,100)/100` for pistol, shotgun, chaingun, rockets |
+| 40–43 | 4 | Unlocked flags as 1/0 |
+| 44–45 | 2 | `weapon/3`, `min(time/120,1)` |
+| 46–57 | 12 | **Recurrent** wall memory: leaky average of the ray block |
+| 58–63 | 6 | **Recurrent** previous action: turn, forward, strafe, fire, exit, run |
 
-Rays use the current player angle; bearings are relative to the player angle.
-There is no explicit map input beyond the 8 rays and entity/pickup/exit
-bearings. Ties preserve encounter order (both implementations sort stably by
-distance).
+Recurrence details:
+
+- Ray memory update per step: `mem = 0.75*mem + 0.25*ray_now` (`RAY_MEMORY_DECAY`),
+  applied to all 12 rays after the action is chosen.
+- Action memory holds the *chosen* action after clamping: turn/forward/strafe in
+  `[-1, 1]`, and fire/exit/run as 0/1. The weapon index is not fed back.
+- Both blocks are zero at episode start. `agent_start` resets them (via
+  `start_new_run`), so a reused `--evaluate-server` process does not leak memory
+  between jobs. GUI `R`/death restarts also reset them.
+
+Rays use exact grid traversal (Amanatides-Woo DDA) in f64 on both sides, so the
+feature is the distance at which the ray enters the first solid cell. The
+earlier 0.1-tile fixed-step march cost up to 80 grid lookups per ray and
+dominated the per-step budget; DDA needs at most ~12 crossings inside 8 tiles
+and made the Python/Rust values agree to f32 rounding instead of cell-boundary
+steps.
+
+Bearings are relative to the player angle. There is no explicit map input beyond
+the 12 rays, the entity/pickup/exit bearings, and the recurrent memory. Ties
+preserve encounter order (both implementations sort stably by distance).
 
 ### 7.3 Evolution loop (`training/train.py`)
 
-- Population initialized from `N(0, initial_weight_sigma)` per weight.
-- `PARAMETERS = 10 * (42 + 1) = 430`; `CAMPAIGN_LEVELS = 50`.
+- Population initialized from a **fan-in scaled** Gaussian: for a layer with
+  `fan_in` inputs, weights *and* biases are drawn from
+  `N(0, initial_weight_sigma / sqrt(fan_in))`. `initial_weight_sigma` is
+  therefore the target standard deviation of a neuron's **pre-activation**. The
+  earlier flat `N(0, 0.35)` gave layer-1 pre-activations a std of ≈2.3 and left
+  ~15% of hidden units saturated from generation 0.
+- `parameter_count(shape)` from `env.py` replaces the old `PARAMETERS = 430`
+  constant; `CAMPAIGN_LEVELS = 50` is unchanged.
 - Per generation:
   1. Compute `seeds = seed + generation*evaluation_episodes + i` and the
      expected start level for each seed.
@@ -631,8 +685,15 @@ distance).
   8. Fill the rest by choosing a parent uniformly from the top
      `min(parent_pool_size, population_size)` and mutating each gene
      independently with probability `mutation_rate`, adding
-     `N(0, mutation_sigma)`.
-  9. Append a metrics row and flush; overwrite the checkpoint, manifest, and
+     `N(0, mutation_sigma / sqrt(fan_in))`, scaled by a global
+     `mutation_radius`.
+  9. Mutation schedule: while the best fitness keeps improving,
+     `mutation_radius = 1.0`. After `mutation_adapt_patience` generations
+     without improvement the radius is multiplied by `mutation_adapt_growth`
+     (capped at `mutation_adapt_max`) to escape a local optimum, and it resets
+     on any improvement. The radius, the best-ever fitness, and the stale
+     counter are stored in the checkpoint.
+ 10. Append a metrics row and flush; overwrite the checkpoint, manifest, and
      best policy; append a `profile.csv` row.
 - Profiling is opt-in via `DOOM_PROFILE=1`. `profile.csv` and
   `profile_summary.json` are always written, but the Rust timing columns are
@@ -724,16 +785,20 @@ Stat definitions:
 | --- | ---: | --- |
 | `cpu_threads` | 0 | 0 = all available CPUs; -1 = all but one; positive = exact worker count |
 | `generations` | 500 | Total generations to run (current `config.json`) |
-| `population_size` | 128 | Genomes per generation |
-| `elite_count` | 12 | Top genomes copied unchanged |
-| `parent_pool_size` | 32 | Top genomes eligible as parents |
-| `initial_weight_sigma` | 0.35 | Std-dev for initial weights |
+| `population_size` | 64 | Genomes per generation |
+| `elite_count` | 6 | Top genomes copied unchanged |
+| `parent_pool_size` | 16 | Top genomes eligible as parents |
+| `hidden_layers` | `[16, 8]` | Hidden widths; `[]` = single-layer linear policy. Shape is `[64, *hidden_layers, 10]` |
+| `initial_weight_sigma` | 0.8 | Target pre-activation std; per-weight sigma is `this / sqrt(fan_in)` |
 | `mutation_rate` | 0.08 | Per-gene mutation probability |
-| `mutation_sigma` | 0.18 | Std-dev of mutation noise |
+| `mutation_sigma` | 0.18 | Target pre-activation change; per-gene sigma is `this / sqrt(fan_in)`, times the adaptive radius |
+| `mutation_adapt_patience` | 25 | Generations without improvement before the mutation radius grows; 0 disables |
+| `mutation_adapt_growth` | 1.1 | Multiplier applied to the mutation radius on stagnation |
+| `mutation_adapt_max` | 3.0 | Upper bound on the mutation radius |
 | `time_step_seconds` | 0.05 | Simulation step; must be in `(0, 0.05]` |
 | `max_steps` | 15000 | Per-episode step cap (15000 × 0.05 = 750 s) |
 | `max_levels_per_agent` | 50 | Maximum completed level transitions per episode; 1 ≤ value ≤ campaign_levels |
-| `evaluation_episodes` | 2 | Episodes averaged per genome per generation |
+| `evaluation_episodes` | 4 | Episodes averaged per genome per generation (raised from 2 to cut fitness noise; wall time scales with it) |
 | `doom_difficulty` | `medium` | `easy`, `medium`, or `hard` |
 | `start_level` | `[1, 50]` | Inclusive 1-based level range `[low, high]`; each episode picks uniformly from it. `[N, N]` pins the level. Shorthands: `0` = `[1, campaign_levels]`, `N` = `[N, N]` (optional key) |
 | `campaign_levels` | 50 | Must equal 50 (hard-coded check) |
@@ -769,8 +834,12 @@ Validation in `train.py` (strict schema):
 
 - Unknown top-level keys are rejected. Missing keys fail except `resume`,
   `max_levels_per_agent`, `manifest_file`, `profile_file`,
-  `profile_summary_file`, and `start_level`, which have defaults filled by
-  `DEFAULT_CONFIG`.
+  `profile_summary_file`, `start_level`, `hidden_layers`, and the three
+  `mutation_adapt_*` keys, which have defaults filled by `DEFAULT_CONFIG`.
+- `hidden_layers` must be an array of at most 8 integers in `1..=128`; the
+  resulting weight count must match what the Rust `Policy` expects (it is not
+  hard-coded, so any accepted shape works as long as both binaries are rebuilt
+  from the same source).
 - `cpu_threads` must be -1, 0, or positive; `generations`, `population_size`,
   `elite_count`, `parent_pool_size`, `max_steps`, `evaluation_episodes`, and
   `max_levels_per_agent` must be positive integers.
@@ -796,7 +865,7 @@ Provenance and resume fingerprints:
 - `compatibility_hash` = SHA-256 of the same config excluding only
   `cpu_threads`, `generations`, and `resume`. This is the resume fingerprint:
   changing the output directory, seed, reward weights, level cap, difficulty,
-  or other behavioral settings requires `--fresh`.
+  `hidden_layers`, or other behavioral settings requires `--fresh`.
 - `run_id` = `{seed}-{config_hash[:12]}-{UTC timestamp with microseconds}`.
 - The executable's SHA-256 is recorded; resuming requires the current binary to
   match exactly (rebuild or use `--fresh`).
@@ -826,10 +895,13 @@ Provenance and resume fingerprints:
   "generation": 0,
   "evaluation_seed_offset": 0,
   "next_evaluation_seed": 2001903,
-  "population": [[/* 430 floats */]],
+  "population": [[/* parameter_count(shape) floats */]],
   "best_result": {"fitness": 0.0, "levels": 0.0, "kills": 0.0,
                    "health": 0.0, "seconds": 0.0, "start_level": 0},
-  "best_genome": [/* 430 floats */],
+  "best_genome": [/* parameter_count(shape) floats */],
+  "mutation_radius": 1.0,
+  "best_ever_fitness": 0.0,
+  "stale_generations": 0,
   "random_state": [/* Python random state: version, 625 ints, gauss_next */],
   "created_at": "...",
   "updated_at": "..."
@@ -841,7 +913,10 @@ generation):
 
 ```json
 {
-  "architecture": {"inputs": 42, "outputs": 10, "activation": "tanh-linear"},
+  "architecture": {"inputs": 64, "hidden_layers": [16, 8], "outputs": 10,
+                    "activation": "tanh",
+                    "layout": "layer-major; per neuron fan_in inputs then bias"},
+  "policy_shape": "64,16,8,10",
   "run_id": "...",
   "seed": 2001901,
   "config_hash": "...",
@@ -850,14 +925,15 @@ generation):
   "doom_difficulty": "medium",
   "result": {"fitness": 0.0, "levels": 0.0, "kills": 0.0,
               "health": 0.0, "seconds": 0.0, "start_level": 0},
-  "weights": [/* exactly 430 floats */]
+  "weights": [/* parameter_count(shape) floats; 1266 by default */]
 }
 ```
 
 - `generation` is 0-based; the GUI displays `generation + 1`.
-- The GUI's naive parser depends on the key names and weights array shape. It
-  ignores the extra `run_id`, `seed`, `config_hash`, and `compatibility_hash`
-  fields.
+- The GUI's naive parser reads `policy_shape` (a comma-separated string) and the
+  flat `weights` array; it ignores the other keys, including `architecture`.
+  Keep the flat array named exactly `weights`, and do not add a key that
+  *contains* the quoted token `"weights"` and sorts before it.
 
 `training/output/metrics.csv` columns:
 
@@ -951,8 +1027,13 @@ doom_headless --evaluate \
 
 - Exactly 18 arguments after `--evaluate`; the last 13 are fitness weights in
   the order listed above.
-- Policy weights are read from stdin as comma-separated floats; exactly 430
-  required.
+- Policy weights are read from stdin as comma-separated floats; the count must
+  match the `--arch` shape (1266 for the default 64,16,8,10).
+- `--arch a,b,c,…` (or `--arch=a,b,c,…`) sets the policy shape. It is a
+  **launch-time** property of the process, extracted before mode dispatch, so it
+  never travels inside a job line. Omitting it selects the single-layer
+  `64,10` policy. Only the headless binary parses it; the trainer passes it when
+  it spawns each `--evaluate-server`.
 - stdout: `score,level_count,total_kills,health,total_time,start_level`
   (`total_time` formatted to 2 decimals).
 - Exit codes: 1 = level initialization failure, 2 = evaluation failure
@@ -966,7 +1047,8 @@ doom_headless --evaluate-server
 
 - Reads one job per line, writes one JSON result per line. Job format:
   `start_level,difficulty,dt,max_steps,max_levels_per_agent,` followed by the
-  13 fitness weights and then exactly 430 policy weights.
+  13 fitness weights and then the policy weights for the process's `--arch`
+  shape.
 - Result: `{"score":…,"levels":…,"kills":…,"health":…,"seconds":…,
   "start_level":…}` plus `"profile"` when `DOOM_PROFILE=1`.
 - One `Game` is reused for the life of the process; `run_episode` calls
@@ -994,15 +1076,25 @@ doom_headless --evaluate-server
   `max_levels` cap (constructor default 10). `step` reports `done` when dead or
   after `max_levels` level transitions. It requires `reset()` before `step()`
   because it compares against the previous observation.
-- `encode_observation(obs)` — Python version of the 42-value input vector.
-- `choose_action(weights, obs)` — Python version of the policy forward pass
-  and action decoding.
-- `Evaluator` — a persistent `doom_headless --evaluate-server` process used by
-  training. `evaluate(weights, cfg, seed)` computes the start level, writes one
-  job line (five run parameters + 13 fitness weights + 430 policy weights), and
-  reads one JSON result. `warm_up(cfg)` runs a one-step episode at startup.
-  `profile=True` (or the trainer's `DOOM_PROFILE=1`) enables the Rust timers.
-  A crashed server is restarted and the episode retried once.
+- `observe(obs, state=None)` — Python version of the 64-value input vector,
+  including the recurrent blocks. `_ray_distance` is the Python mirror of the
+  Rust DDA.
+- `PolicyState` — the recurrent memory (`rays`, `action`) plus `reset()`.
+  `encode_observation(obs)` is a stateless wrapper around `observe` that uses a
+  fresh state.
+- `policy_shape(cfg)` / `parameter_count(shape)` — shape and weight arithmetic;
+  `policy_shape` is `(64, *cfg["hidden_layers"], 10)`.
+- `forward_policy(weights, shape, inputs)` — Python MLP forward pass.
+- `choose_action(weights, obs, state=None, shape=None)` — `observe` +
+  `forward_policy` + action decoding + memory advance.
+- `Evaluator(executable, shape=None, profile=False)` — a persistent
+  `doom_headless --evaluate-server` process used by training; it passes
+  `--arch` at spawn time. `evaluate(weights, cfg, seed)` checks the genome
+  length against the shape, computes the start level, writes one job line (five
+  run parameters + 13 fitness weights + policy weights), and reads one JSON
+  result. `warm_up(cfg)` runs a one-step episode at startup. `profile=True` (or
+  the trainer's `DOOM_PROFILE=1`) enables the Rust timers. A crashed server is
+  restarted and the episode retried once.
 - `evaluate(weights, executable, cfg, seed)` — compatibility wrapper that opens
   a temporary `Evaluator`, runs one episode, and closes it.
 - The interactive `HeadlessDoomEnv` class is not used by `train.py`; it is
@@ -1010,13 +1102,17 @@ doom_headless --evaluate-server
 
 `training/train.py`:
 
-- Constants: `PARAMETERS = 430`, `CAMPAIGN_LEVELS = 50`.
+- Constants: `CAMPAIGN_LEVELS = 50`; the policy size comes from
+  `env.policy_shape(cfg)`.
 - `tester_count` resolves `cpu_threads` using `os.process_cpu_count()` when
   available, then `sched_getaffinity`, then `os.cpu_count()`.
 - Configuration validation/defaults, `canonical_config`, `compute_config_hash`,
   `compute_compatibility_hash`, `sha256_file`, run-id/manifest helpers.
-- `mutate`, `initialize_worker`/`run_job` (thread-local `Evaluator`), `make_pool`,
-  `summarize_episodes`, `profile_totals`, `list_state`, `tuple_state`.
+- `initial_genome`, `mutation_scales`, `mutate`,
+  `initialize_worker`/`run_job` (thread-local `Evaluator` built with the
+  configured shape), `make_pool`, `summarize_episodes`, `profile_totals`,
+  `list_state`, `tuple_state`, `policy_shape`/`parameter_count` re-exported from
+  `env`.
 - `main()` handles CLI/config validation, build/executable resolution,
   checkpoint/manifest/metrics validation, resume, the generation loop,
   checkpointing, policy export, and the profile CSV/summary.
@@ -1038,20 +1134,33 @@ Python 3.9+ is sufficient (the local system Python is 3.9.6).
 
 Read these before changing anything.
 
-1. **430 is hard-coded in multiple places.**
-   - `training/train.py`: `PARAMETERS = 10 * (42 + 1)`.
-   - `doom/src/main.rs`: `if weights.len() != 430`.
-   - `doom/src/bin/doom_headless.rs`: `if weights.len() != 430`.
-   - `best_policy.json` architecture metadata in `train.py`.
-   - The GUI policy parser requires exactly 430 weights.
-   Changing the policy size requires updating all of them plus the input
-   encoder/decoder.
+1. **The policy shape is data, but the input width is duplicated.**
+   - `config.json`'s `hidden_layers` sets the hidden widths; the full shape is
+     `[64, *hidden_layers, 10]`. There is no hard-coded 430 anywhere any more.
+   - `training/env.py::policy_shape` / `parameter_count` compute the shape and
+     weight count; `train.py` uses them for initialisation, mutation scaling,
+     the policy export, and the `--arch` it passes to the evaluator.
+   - `doom/src/bin/doom_headless.rs` parses `--arch` and builds
+     `game::Policy`; nothing is hard-coded there.
+   - `doom/src/main.rs` reads `policy_shape` from `best_policy.json`.
+   - The **input width (64)** is still a compile-time constant on both sides
+     (`POLICY_INPUTS` in `game.rs`, `INPUT_COUNT` in `env.py`), together with
+     `RAY_COUNT` and `ACTION_MEMORY`. Changing the encoder changes the shape, so
+     both must be updated and the run restarted with `--fresh`.
 
-2. **The 42-input encoder is duplicated.**
-   - Python: `training/env.py::encode_observation`.
-   - Rust: `game.rs::agent_policy_action`.
-   Any change to ray count, entity features, ordering, or normalization must
-   be mirrored exactly or Python-side and Rust-side policies will diverge.
+2. **The encoder and forward pass are duplicated.**
+   - Python: `training/env.py::observe` and `forward_policy`.
+   - Rust: `game.rs::agent_inputs` and `Policy::forward`.
+   Any change to ray count, entity features, ordering, normalization, recurrent
+   blocks, layer ordering, or bias placement must be mirrored exactly, or the
+   Python debug path and the Rust evaluator diverge. `doom_headless --probe`
+   prints the Rust inputs/outputs for one step so the two can be diffed.
+
+2b. **Recurrent state must be reset per episode.** `agent_start` (via
+    `start_new_run`) zeroes `policy_memory`. A reused `--evaluate-server`
+    `Game` otherwise carries the previous genome's wall memory and action into
+    the next job, which silently diverges from `--evaluate`. Any new
+    episode-scoped policy state belongs in that reset.
 
 3. **The episode cap is configurable but still duplicated.**
    - `max_levels_per_agent` is passed from Python to Rust and validated
@@ -1095,11 +1204,13 @@ Read these before changing anything.
    `clear_training_data.sh` delete the output directory.
 
 10. **The GUI policy parser is not real JSON parsing.** It searches for the
-    first `"generation"`, `"doom_difficulty"`, and `"weights"` strings. Keep
-    `best_policy.json` shaped as emitted by `train.py`, or update
-    `main.rs::load_agent_policy`. A missing or invalid policy is silently
-    ignored (the previous valid policy, if any, remains active), and the
-    watcher shows its waiting status.
+    first `"generation"`, `"doom_difficulty"`, `"policy_shape"`, and
+    `"weights"` strings. Keep `best_policy.json` shaped as emitted by
+    `train.py`, or update `main.rs::load_agent_policy`. A missing or invalid
+    policy is silently ignored (the previous valid policy, if any, remains
+    active), and the watcher shows its waiting status. Do not add a key whose
+    name *contains* `"weights"` — sorted key order could place it before the
+    real array. `cargo test --bin doom` covers this parser.
 
 11. **The GUI watcher reloads weights mid-episode.** If only weights/generation
     change, the current episode continues with the new policy; difficulty
@@ -1177,9 +1288,9 @@ Read these before changing anything.
 
 25. **`--evaluate-server` reuses one `Game` forever.** Every per-episode field
     must be reset by `agent_start` (directly or via `start_new_run`): timers,
-    hit effects, `kills`, profile counters, and all agent statistics. If you add
-    new episode-scoped state and skip the reset, later jobs inherit it and
-    training silently diverges from `--evaluate`.
+    hit effects, `kills`, profile counters, all agent statistics, and
+    `policy_memory`. If you add new episode-scoped state and skip the reset,
+    later jobs inherit it and training silently diverges from `--evaluate`.
 
 26. **Profiling changes timing, not results.** `DOOM_PROFILE=1` enables the
     nanosecond counters (roughly 10% wall-time cost) and adds a `profile`
@@ -1200,10 +1311,21 @@ Read these before changing anything.
   For new terms, update `FITNESS_WEIGHT_KEYS` in `env.py`, the job-line parser
   and `FitnessWeights` in `doom_headless.rs`, the scoring loop in `run_episode`,
   the config schema/validation, and this guide.
-- **Change policy size/architecture:** update `train.py` constants and
-  architecture metadata, `env.py` encoder/decoder, `game.rs`
-  `agent_policy_action`, both 430-weight checks, and the GUI parser's 430
-  check. Update the observation docs here.
+- **Change the policy shape:** edit `hidden_layers` in `config.json` (or pass a
+  different config). Nothing else changes — the trainer derives the weight
+  count, passes it as `--arch`, and writes `policy_shape` for the GUI. The
+  compatibility hash changes, so use `--fresh`. Verify with
+  `python3 training/train.py --generations 1 --fresh` and check
+  `len(best_policy.json["weights"]) == parameter_count(shape)`.
+- **Change the network math or layout:** update `Policy::forward` in `game.rs`
+  *and* `forward_policy` in `env.py`, then diff them with
+  `doom_headless --probe <level> <difficulty> --arch <shape>` against
+  `env.observe` for the same level. Also update §7.1/§7.2 here and the
+  `architecture` metadata in `train.py`.
+- **Change the encoder:** update `RAY_COUNT`/`ACTION_MEMORY`/`POLICY_INPUTS` in
+  `game.rs` and `RAY_COUNT`/`ACTION_MEMORY`/`INPUT_COUNT` in `env.py`, mirror
+  `agent_inputs`/`observe`, re-run the probe diff, and update §7.2. The input
+  width is part of the shape, so this requires `--fresh` too.
 - **Change game behavior:** edit `game.rs`; both GUI and training change
   together. Rebuild both binaries. Update `AGENTS.md` if contracts change.
 - **Change controls/UI:** `game.rs::handle_input`/`handle_settings_input`,
@@ -1219,16 +1341,21 @@ Read these before changing anything.
   `output_directory` for a completely clean directory. Changing
   `output_directory` changes the compatibility hash.
 - **Debug an episode:** call `training/env.py::evaluate` directly, or run
-  `doom_headless --evaluate` with the 18 arguments and 430 weights on stdin.
+  `doom_headless --evaluate` with the 18 arguments and the policy weights on
+  stdin (plus `--arch` if the shape is not the single-layer default).
   For step-by-step control, use `HeadlessDoomEnv` (reset first).
 
 ## 11. Verification checklist
 
-There is no automated test suite or CI. Verify manually:
+There is no CI. Verify manually (there are two Rust unit tests for the GUI
+policy parser):
 
 ```sh
 # Rust compile check (GUI + headless-without-gui)
 cd doom && cargo check --bin doom && cargo check --bin doom_headless --no-default-features
+
+# Policy-file parser tests (GUI parser, shape + weights plumbing)
+cd doom && cargo test --bin doom
 
 # Release build (what scripts/training use)
 ./exec_mgmt.sh -b
@@ -1243,14 +1370,15 @@ python3 training/train.py --build --generations 1 --fresh
 python3 - <<'PY'
 import json
 p = json.load(open("training/output/best_policy.json"))
-print(len(p["weights"]), p["generation"], p["doom_difficulty"])
+print(p["policy_shape"], len(p["weights"]), p["generation"], p["doom_difficulty"])
 print(json.load(open("training/output/run_manifest.json"))["status"])
 PY
 ```
 
 Expected smoke result: a `generation 1/1` line, a checkpoint with a
-`population_size × 430` population, `best_policy.json` with exactly 430
-weights, and a manifest whose `status` becomes `completed`. Run a second
+`population_size × parameter_count(shape)` population (64 × 1266 by default),
+`best_policy.json` whose `policy_shape` is `"64,16,8,10"` and whose `weights`
+length matches, and a manifest whose `status` becomes `completed`. Run a second
 generation with `resume: true` to exercise resume; the metrics file should
 append generation 1 and keep the same `run_id`.
 
@@ -1261,9 +1389,9 @@ Other checks:
 ./doom/target/release/doom_headless
 # then: reset,0,medium / step,1,1,0,1,0,0,0,0.05 / quit
 
-# Direct evaluator (430 comma-separated weights on stdin)
+# Direct evaluator (policy weights on stdin, shape from --arch)
 ./doom/target/release/doom_headless --evaluate 0 medium 0.05 15000 10 \
-  1000 100 2 20 0.25 8 0.25 1 0.5 0.5 0.25 0.1 250 < weights.txt
+  1000 100 2 20 0.25 8 0.25 1 0.5 0.5 0.25 0.1 250 --arch 64,16,8,10 < weights.txt
 
 # GUI
 ./exec_mgmt.sh -r
@@ -1284,14 +1412,27 @@ To verify the server path and the one-shot path agree:
 ```sh
 # Same inputs must yield the same score
 ./doom/target/release/doom_headless --evaluate 0 medium 0.05 200 2 \
-  1000 100 2 20 0.25 8 0.25 1 0.5 0.5 0.25 0.1 250 < weights.txt
-# job line: start_level,difficulty,dt,max_steps,max_levels + 13 weights + 430 weights
-./doom/target/release/doom_headless --evaluate-server < jobs.txt
+  1000 100 2 20 0.25 8 0.25 1 0.5 0.5 0.25 0.1 250 --arch 64,16,8,10 < weights.txt
+# job line: start_level,difficulty,dt,max_steps,max_levels + 13 weights + policy weights
+./doom/target/release/doom_headless --evaluate-server --arch 64,16,8,10 < jobs.txt
 ```
+
+To verify the duplicated encoder and forward pass agree:
+
+```sh
+# Rust: inputs, outputs and shape for the first step of a level
+./doom/target/release/doom_headless --probe 0 medium --arch 64,16,8,10 < weights.txt
+# Python: HeadlessDoomEnv(...).reset(0) + env.observe(obs, env.PolicyState())
+#         + env.forward_policy(weights, shape, inputs)
+```
+
+Expect agreement to f32 rounding (worst observed ~5e-7 on inputs and outputs);
+a larger gap means the two implementations have drifted.
 
 ## 12. Glossary
 
-- **Genome / policy / weights:** the flat 430-float vector.
+- **Genome / policy / weights:** the flat weight vector for the configured
+  shape (`64→16→8→10` = 1266 floats by default).
 - **Generation:** one full evaluate → rank → select → mutate cycle.
 - **Episode:** one headless run from a start level until death,
   `max_levels_per_agent` level transitions, or `max_steps`.

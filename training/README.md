@@ -9,6 +9,30 @@ survival, and efficient ammo and time use. The Rust
 headless executable runs the same simulation code as the game, without a
 window.
 
+## Policy
+
+The policy is a fully connected `tanh` multilayer perceptron whose shape is data,
+not code: `hidden_layers` in `config.json` lists the hidden widths, and the total
+weight count follows from it. The default `[16, 8]` gives
+`64 → 16 → 8 → 10` and 1266 parameters; an empty list reproduces the original
+single-layer linear policy. Adding, removing, or resizing a hidden layer only
+changes `hidden_layers` and needs `--fresh`.
+
+The 64 inputs are wall rays, the two nearest enemies, the nearest pickup, the
+exit, health/armor/ammo/unlocked/weapon/time, plus two recurrent blocks: a leaky
+average of the wall rays and the previous action (turn, forward, strafe, fire,
+exit, run). The recurrent blocks give the policy a short memory of where it has
+been; they are reset at the start of every episode.
+
+Weights are layer-major: for each layer, every output neuron stores its `fan_in`
+input weights followed by its bias. `initial_weight_sigma` is the target
+standard deviation of a neuron's *pre-activation*, so each layer is scaled by
+`1/sqrt(fan_in)`; a flat per-weight sigma would saturate the wide input layer.
+`mutation_sigma` is normalized the same way. When the best fitness stops
+improving for `mutation_adapt_patience` generations the mutation radius grows by
+`mutation_adapt_growth` (up to `mutation_adapt_max`) to escape a local optimum,
+and resets on any improvement.
+
 ## Build and run
 
 From the repository root:
@@ -47,7 +71,9 @@ output paths. `doom_difficulty` selects Easy, Medium, or Hard game settings.
 passed to the Rust evaluator instead of the old hard-coded ten-level limit.
 `start_level` selects where episodes begin: an inclusive 1-based range
 `[low, high]` (for example `[3, 5]` picks levels 3–5), where `[N, N]` pins every
-episode to level `N`.
+episode to level `N`. `evaluation_episodes` is the number of episodes averaged
+per genome per generation; larger values reduce fitness noise at a proportional
+cost in wall time.
 
 All thirteen reward weights in `fitness` are active. `level_completion`,
 `partial_level`, `health_per_point`, `kill`, `health_gain`, and `armor_gain` add
@@ -93,3 +119,18 @@ interactive episodes. Observations contain player state, map, enemies, pickups,
 and exit position. Actions contain normalized turn, forward and strafe values,
 fire/exit flags, weapon index, and run flag. The trainer maps observations to
 actions and evaluates evolved policies.
+
+`observe(obs, state)` builds the policy input vector and `forward_policy(weights,
+shape, inputs)` runs the network; `choose_action(weights, obs, state, shape)`
+combines them. These are Python mirrors of `Game::agent_inputs` and
+`Policy::forward` in `doom/src/game.rs` and must stay in sync with them. Pass a
+`PolicyState` to `observe`/`choose_action` for the recurrent inputs, and reset it
+per episode.
+
+To check the two implementations against each other, compare the Python encoder
+with the Rust probe:
+
+```sh
+# prints the inputs, outputs and shape for the first step of a level
+doom/target/release/doom_headless --probe 0 medium --arch 64,16,8,10 < weights.txt
+```

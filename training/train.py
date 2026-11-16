@@ -18,10 +18,17 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from env import FITNESS_WEIGHT_KEYS, Evaluator, resolve_start_level
+from env import (
+    INPUT_COUNT,
+    OUTPUT_COUNT,
+    Evaluator,
+    FITNESS_WEIGHT_KEYS,
+    parameter_count,
+    policy_shape,
+    resolve_start_level,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
-PARAMETERS = 10 * (42 + 1)
 CAMPAIGN_LEVELS = 50
 PROFILE_ENABLED = os.environ.get("DOOM_PROFILE", "") not in ("", "0")
 PROFILE_KEYS = (
@@ -54,6 +61,13 @@ DEFAULT_CONFIG = {
     "profile_summary_file": "profile_summary.json",
     "resume": False,
     "start_level": 0,
+    # No hidden layer reproduces the original single-layer linear policy.
+    "hidden_layers": [],
+    # Stagnation-triggered mutation schedule: widen the search radius when the
+    # best fitness has not improved for this many generations.
+    "mutation_adapt_patience": 25,
+    "mutation_adapt_growth": 1.1,
+    "mutation_adapt_max": 3.0,
 }
 
 REQUIRED_KEYS = (
@@ -165,6 +179,25 @@ def validate_config(cfg):
     require_int("campaign_levels", minimum=1)
     require_int("seed")
     require_int("max_levels_per_agent", minimum=1)
+
+    def require_hidden_layers():
+        value = cfg["hidden_layers"]
+        if not isinstance(value, (list, tuple)):
+            raise SystemExit("hidden_layers must be an array of layer widths")
+        layers = list(value)
+        if len(layers) > 8:
+            raise SystemExit("hidden_layers supports at most 8 hidden layers")
+        for width in layers:
+            if isinstance(width, bool) or not isinstance(width, int):
+                raise SystemExit("hidden_layers must contain integers")
+            if not 1 <= width <= 128:
+                raise SystemExit("hidden_layers widths must be in 1..128")
+        cfg["hidden_layers"] = layers
+
+    require_hidden_layers()
+    require_int("mutation_adapt_patience", minimum=0)
+    require_number("mutation_adapt_growth", minimum=1.0)
+    require_number("mutation_adapt_max", minimum=1.0)
 
     def require_start_level(levels):
         value = cfg["start_level"]
@@ -421,12 +454,37 @@ def validate_metrics(path, cfg, run_id, checkpoint_generation):
         )
 
 
-def mutate(parent, cfg, rng):
+def initial_genome(shape, cfg, rng):
+    """Fan-in scaled initialization.
+
+    `initial_weight_sigma` is the target standard deviation of a neuron's
+    pre-activation, so each layer's weights are divided by `sqrt(fan_in)`. A
+    fixed per-weight sigma would saturate `tanh` in the wide input layer while
+    leaving narrow deeper layers nearly linear.
+    """
+    genome = []
+    sigma = cfg["initial_weight_sigma"]
+    for fan_in, fan_out in zip(shape, shape[1:]):
+        scale = sigma / math.sqrt(fan_in)
+        genome.extend(rng.gauss(0.0, scale) for _ in range(fan_out * (fan_in + 1)))
+    return genome
+
+
+def mutation_scales(shape, cfg):
+    """Per-gene mutation sigma, fan-in normalized like the initialization."""
     sigma = cfg["mutation_sigma"]
+    scales = []
+    for fan_in, fan_out in zip(shape, shape[1:]):
+        scales.extend([sigma / math.sqrt(fan_in)] * (fan_out * (fan_in + 1)))
+    return scales
+
+
+def mutate(parent, scales, cfg, rng, radius=1.0):
+    rate = cfg["mutation_rate"]
     child = parent[:]
-    for i in range(len(child)):
-        if rng.random() < cfg["mutation_rate"]:
-            child[i] += rng.gauss(0, sigma)
+    for index, scale in enumerate(scales):
+        if rng.random() < rate:
+            child[index] += rng.gauss(0.0, scale * radius)
     return child
 
 
@@ -444,7 +502,7 @@ def initialize_worker(executable, cfg):
     re-spawning the simulator for each of the thousands of episodes per
     generation.
     """
-    evaluator = Evaluator(executable, profile=PROFILE_ENABLED)
+    evaluator = Evaluator(executable, shape=policy_shape(cfg), profile=PROFILE_ENABLED)
     evaluator.warm_up(cfg)
     _WORKER.cfg = cfg
     _WORKER.evaluator = evaluator
@@ -527,6 +585,8 @@ def main():
     executable_hash = sha256_file(executable)
     config_hash = compute_config_hash(cfg)
     compatibility_hash = compute_compatibility_hash(cfg)
+    shape = policy_shape(cfg)
+    parameters = parameter_count(shape)
     commit, dirty = git_metadata()
     rust = rust_version()
 
@@ -548,6 +608,15 @@ def main():
         run_id = checkpoint_metadata["run_id"]
         start_generation = saved["generation"] + 1
         population = saved["population"]
+        for genome in population:
+            if len(genome) != parameters:
+                raise SystemExit(
+                    "checkpoint genomes do not match the configured policy shape; "
+                    "use --fresh to start a new run"
+                )
+        mutation_radius = float(saved.get("mutation_radius", 1.0))
+        best_ever = saved.get("best_ever_fitness")
+        stale_generations = int(saved.get("stale_generations", 0))
         rng = random.Random()
         rng.setstate(tuple_state(saved["random_state"]))
         created_at = checkpoint_metadata["created_at"] or utc_now()
@@ -561,8 +630,10 @@ def main():
             print("Starting a fresh run")
         run_id = make_run_id(cfg["seed"], config_hash)
         rng = random.Random(cfg["seed"])
-        population = [[rng.gauss(0, cfg["initial_weight_sigma"]) for _ in range(PARAMETERS)]
-                      for _ in range(cfg["population_size"])]
+        population = [initial_genome(shape, cfg, rng) for _ in range(cfg["population_size"])]
+        mutation_radius = 1.0
+        best_ever = None
+        stale_generations = 0
         start_generation = 0
         created_at = utc_now()
 
@@ -602,6 +673,7 @@ def main():
     print(f"Run ID: {run_id}")
     print(f"Output directory: {output}")
     print(f"Seed: {cfg['seed']}")
+    print(f"Policy shape: {list(shape)} ({parameters} parameters)")
     print(f"Configuration hash: {config_hash}")
     print(f"Resume fingerprint: {compatibility_hash}")
     print(f"Checkpoint loaded: {'yes' if loaded_checkpoint else 'no'}")
@@ -614,6 +686,7 @@ def main():
     profile_mode = "a" if loaded_checkpoint and profile_path.exists() else "w"
     profile_rows = []
     main_start = time.perf_counter()
+    scales = mutation_scales(shape, cfg)
     pool = make_pool(executable, cfg, workers)
     try:
         with metrics_path.open(metrics_mode, newline="") as metrics_file, \
@@ -651,10 +724,25 @@ def main():
                 ranked_done = time.perf_counter()
                 best, best_genome = ranked[0]
                 mean_fitness = sum(result["fitness"] for result, _ in ranked) / len(ranked)
+                progressed = best_ever is None or best["fitness"] > best_ever + 1e-9
+                if progressed:
+                    best_ever = best["fitness"]
+                    stale_generations = 0
+                    mutation_radius = 1.0
+                else:
+                    stale_generations += 1
+                    patience = cfg["mutation_adapt_patience"]
+                    if patience and stale_generations >= patience:
+                        mutation_radius = min(
+                            cfg["mutation_adapt_max"],
+                            mutation_radius * cfg["mutation_adapt_growth"],
+                        )
+                        stale_generations = 0
+                radius_note = "" if mutation_radius == 1.0 else f" | radius {mutation_radius:.2f}"
                 print(f"generation {generation + 1}/{cfg['generations']} | testers {workers} | "
                       f"best {best['fitness']:.1f} | levels {best['levels']} | "
                       f"kills {best['kills']} | hp {best['health']} | "
-                      f"{best['seconds']:.1f}s", flush=True)
+                      f"{best['seconds']:.1f}s{radius_note}", flush=True)
                 writer.writerow({"run_id": run_id, "generation": generation,
                                  "best_fitness": round(best["fitness"], 3),
                                  "mean_fitness": round(mean_fitness, 3),
@@ -666,7 +754,7 @@ def main():
                 next_population = [genome[:] for _, genome in ranked[:elite_count]]
                 while len(next_population) < cfg["population_size"]:
                     parent = ranked[rng.randrange(min(cfg["parent_pool_size"], len(ranked)))][1]
-                    next_population.append(mutate(parent, cfg, rng))
+                    next_population.append(mutate(parent, scales, cfg, rng, mutation_radius))
                 population = next_population
                 evolution_done = time.perf_counter()
                 checkpoint = {
@@ -689,6 +777,9 @@ def main():
                     "population": population,
                     "best_result": best,
                     "best_genome": best_genome,
+                    "mutation_radius": mutation_radius,
+                    "best_ever_fitness": best_ever,
+                    "stale_generations": stale_generations,
                     "random_state": list_state(rng.getstate()),
                     "created_at": manifest["created_at"],
                     "updated_at": utc_now(),
@@ -698,7 +789,14 @@ def main():
                 manifest["updated_at"] = checkpoint["updated_at"]
                 write_json(manifest_path, manifest)
                 write_json(output / cfg["best_policy_file"], {
-                    "architecture": {"inputs": 42, "outputs": 10, "activation": "tanh-linear"},
+                    "architecture": {
+                        "inputs": INPUT_COUNT,
+                        "hidden_layers": list(cfg["hidden_layers"]),
+                        "outputs": OUTPUT_COUNT,
+                        "activation": "tanh",
+                        "layout": "layer-major; per neuron fan_in inputs then bias",
+                    },
+                    "policy_shape": ",".join(str(width) for width in shape),
                     "run_id": run_id,
                     "seed": cfg["seed"],
                     "config_hash": config_hash,

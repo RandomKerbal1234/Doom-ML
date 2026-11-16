@@ -27,6 +27,16 @@ FITNESS_WEIGHT_KEYS = (
     "death",
 )
 
+# Encoder shape. These constants are duplicated in doom/src/game.rs and must
+# stay in sync with it (`Game::agent_inputs`).
+RAY_COUNT = 12
+ACTION_MEMORY = 6
+OUTPUT_COUNT = 10
+RAY_MEMORY_DECAY = 0.75
+# rays + enemies(2x5) + pickup(9) + exit(3) + health/armor(2) + ammo(4) +
+# unlocked(4) + weapon/time(2) + ray memory + action memory
+INPUT_COUNT = RAY_COUNT + 10 + 9 + 3 + 2 + 4 + 4 + 2 + RAY_COUNT + ACTION_MEMORY
+
 
 def start_level_bounds(cfg):
     """Return the inclusive 1-based `(low, high)` campaign-level range.
@@ -126,20 +136,84 @@ class HeadlessDoomEnv:
 
 
 def encode_observation(obs):
-    """Fixed-size normalized state vector suitable for a small policy."""
+    """Fixed-size normalized state vector suitable for a small policy.
+
+    Kept as a stateless convenience wrapper; recurrent inputs are zero.
+    """
+    return observe(obs)
+
+
+def _ray_distance(x, y, angle, rows):
+    """Distance to the first solid tile along `angle`, normalized to [0, 1].
+
+    Grid traversal (Amanatides-Woo) matching `Game::ray_distance` in
+    doom/src/game.rs. Both sides run in f64 so the values agree closely.
+    """
+    maximum = 8.0
+    direction_x, direction_y = math.cos(angle), math.sin(angle)
+    cell_x, cell_y = math.floor(x), math.floor(y)
+    delta_x = math.inf if direction_x == 0.0 else abs(1.0 / direction_x)
+    delta_y = math.inf if direction_y == 0.0 else abs(1.0 / direction_y)
+    if direction_x < 0.0:
+        step_x = -1
+        side_x = (x - cell_x) * delta_x
+    else:
+        step_x = 1
+        side_x = (cell_x + 1 - x) * delta_x
+    if direction_y < 0.0:
+        step_y = -1
+        side_y = (y - cell_y) * delta_y
+    else:
+        step_y = 1
+        side_y = (cell_y + 1 - y) * delta_y
+    height = len(rows)
+    width = len(rows[0]) if rows else 0
+    distance = 0.0
+    while distance <= maximum:
+        if side_x < side_y:
+            distance, side_x = side_x, side_x + delta_x
+            cell_x += step_x
+        else:
+            distance, side_y = side_y, side_y + delta_y
+            cell_y += step_y
+        if cell_x < 0 or cell_y < 0 or cell_x >= width or cell_y >= height:
+            break
+        if rows[cell_y][cell_x] in "#BM":
+            break
+    return min(min(distance, maximum) / maximum, 1.0)
+
+
+def _ray_values(x, y, angle, rows):
+    """Wall distance for each ray of the fan."""
+    step = math.tau / RAY_COUNT
+    return [_ray_distance(x, y, angle + ray * step, rows) for ray in range(RAY_COUNT)]
+
+
+class PolicyState:
+    """Leaky recurrent inputs fed back into the policy.
+
+    Mirrors `PolicyMemory` in doom/src/game.rs and is reset by `agent_start`.
+    """
+
+    __slots__ = ("rays", "action")
+
+    def __init__(self):
+        self.rays = [0.0] * RAY_COUNT
+        self.action = [0.0] * ACTION_MEMORY
+
+    def reset(self):
+        self.rays = [0.0] * RAY_COUNT
+        self.action = [0.0] * ACTION_MEMORY
+        return self
+
+
+def observe(obs, state=None):
+    """Policy input vector. Must match `Game::agent_inputs` in game.rs."""
+    if state is None:
+        state = PolicyState()
     x, y, angle = obs["x"], obs["y"], obs["angle"]
     rows = obs["map"]
-    values = []
-    for ray in range(8):
-        direction = angle + ray * math.tau / 8
-        distance = 0.0
-        for k in range(1, 81):
-            distance = k * 0.1
-            sx = int(x + math.cos(direction) * distance)
-            sy = int(y + math.sin(direction) * distance)
-            if sy < 0 or sy >= len(rows) or sx < 0 or sx >= len(rows[sy]) or rows[sy][sx] in "#BM":
-                break
-        values.append(min(distance / 8.0, 1.0))
+    values = _ray_values(x, y, angle, rows)
 
     enemies = sorted(obs["enemies"], key=lambda e: math.hypot(e["x"] - x, e["y"] - y))[:2]
     for i in range(2):
@@ -169,23 +243,58 @@ def encode_observation(obs):
     values.extend(min(max(a, 0) / 100, 1) for a in obs["ammo"])
     values.extend(float(v) for v in obs["unlocked"])
     values.extend((obs["weapon"] / 3, min(obs["time"] / 120, 1)))
+
+    values.extend(state.rays)
+    values.extend(state.action)
+    if len(values) != INPUT_COUNT:
+        raise RuntimeError(f"encoder produced {len(values)} inputs, expected {INPUT_COUNT}")
     return values
 
 
-def choose_action(weights, obs):
-    inputs = encode_observation(obs)
-    outputs = []
-    width = len(inputs) + 1
-    for output in range(10):
-        start = output * width
-        value = weights[start + len(inputs)]
-        for i, item in enumerate(inputs):
-            value += weights[start + i] * item
-        outputs.append(math.tanh(value))
+def policy_shape(cfg):
+    """Input/hidden/output widths for the configured policy."""
+    return (INPUT_COUNT, *cfg.get("hidden_layers", ()), OUTPUT_COUNT)
+
+
+def parameter_count(shape):
+    """Flat weight count for a shape, including one bias per neuron."""
+    return sum(fan_out * (fan_in + 1) for fan_in, fan_out in zip(shape, shape[1:]))
+
+
+def forward_policy(weights, shape, inputs):
+    """Layer-major tanh MLP. Must match `Policy::forward` in game.rs."""
+    expected = parameter_count(shape)
+    if len(weights) != expected:
+        raise ValueError(f"expected {expected} weights for shape {shape}, got {len(weights)}")
+    current = list(inputs)
+    cursor = 0
+    for fan_in, fan_out in zip(shape, shape[1:]):
+        width = fan_in + 1
+        next_layer = []
+        for out in range(fan_out):
+            start = cursor + out * width
+            total = weights[start + fan_in]
+            for index in range(fan_in):
+                total += weights[start + index] * current[index]
+            next_layer.append(math.tanh(total))
+        cursor += fan_out * width
+        current = next_layer
+    return current
+
+
+def choose_action(weights, obs, state=None, shape=None):
+    shape = (INPUT_COUNT, OUTPUT_COUNT) if shape is None else tuple(shape)
+    inputs = observe(obs, state)
+    outputs = forward_policy(weights, shape, inputs)
     action = [outputs[0], outputs[1], outputs[2], outputs[3] > 0, outputs[4] > 0,
               0, outputs[9] > 0]
     available = [i for i, unlocked in enumerate(obs["unlocked"]) if unlocked]
     action[5] = max(available, key=lambda i: outputs[5 + i])
+    if state is not None:
+        state.action = [action[0], action[1], action[2],
+                        float(action[3]), float(action[4]), float(action[6])]
+        state.rays = [old * RAY_MEMORY_DECAY + new * (1.0 - RAY_MEMORY_DECAY)
+                      for old, new in zip(state.rays, inputs[:RAY_COUNT])]
     return action
 
 
@@ -195,7 +304,7 @@ def evaluate(weights, executable: Path, cfg, seed: int, profile: bool = False):
     Kept for compatibility and single-shot benchmarking. Training uses
     `Evaluator` below, which keeps a server process alive between episodes.
     """
-    with Evaluator(executable, profile=profile) as evaluator:
+    with Evaluator(executable, shape=policy_shape(cfg), profile=profile) as evaluator:
         return evaluator.evaluate(weights, cfg, seed)
 
 
@@ -208,8 +317,10 @@ class Evaluator:
     worker instead.
     """
 
-    def __init__(self, executable: Path, profile: bool = False):
+    def __init__(self, executable: Path, shape=None, profile: bool = False):
         self.executable = Path(executable)
+        self.shape = (INPUT_COUNT, OUTPUT_COUNT) if shape is None else tuple(shape)
+        self.parameters = parameter_count(self.shape)
         self.profile = profile
         self.process = None
         self.starts = 0
@@ -220,7 +331,8 @@ class Evaluator:
         if self.profile:
             environment["DOOM_PROFILE"] = "1"
         self.process = subprocess.Popen(
-            [str(self.executable), "--evaluate-server"],
+            [str(self.executable), "--evaluate-server",
+             "--arch", ",".join(map(str, self.shape))],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, bufsize=1, env=environment,
         )
@@ -245,6 +357,11 @@ class Evaluator:
         missing = [key for key in FITNESS_WEIGHT_KEYS if key not in fitness]
         if missing:
             raise ValueError(f"fitness configuration is missing: {', '.join(missing)}")
+        if len(weights) != self.parameters:
+            raise ValueError(
+                f"expected {self.parameters} weights for shape {self.shape}, "
+                f"got {len(weights)}"
+            )
         max_levels = int(cfg.get("max_levels_per_agent", 10))
         if max_levels < 1:
             raise ValueError("max_levels_per_agent must be positive")
@@ -279,7 +396,7 @@ class Evaluator:
 
     def warm_up(self, cfg):
         """Run one trivial episode so level parsing is done before timing."""
-        return self.evaluate([0.0] * 430, cfg, seed=0, max_steps=1)
+        return self.evaluate([0.0] * self.parameters, cfg, seed=0, max_steps=1)
 
     def close(self):
         process = self.process

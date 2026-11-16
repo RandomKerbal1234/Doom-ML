@@ -23,11 +23,19 @@ fn main() {
     }
     let levels_elapsed = main_start.elapsed();
     let profiling = std::env::var_os("DOOM_PROFILE").is_some_and(|value| value != "0");
-    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let raw = std::env::args().skip(1).collect::<Vec<_>>();
+    let (shape, arguments) = match take_shape(&raw) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("invalid --arch: {error}");
+            std::process::exit(2);
+        }
+    };
     match arguments.first().map(String::as_str) {
         Some("--evaluate") => {
             if let Err(error) = evaluate_episode(
                 &arguments[1..],
+                &shape,
                 main_start,
                 levels_elapsed,
                 profiling,
@@ -38,8 +46,15 @@ fn main() {
             return;
         }
         Some("--evaluate-server") => {
-            if let Err(error) = evaluate_server(profiling) {
+            if let Err(error) = evaluate_server(&shape, profiling) {
                 eprintln!("evaluation server failed: {error}");
+                std::process::exit(2);
+            }
+            return;
+        }
+        Some("--probe") => {
+            if let Err(error) = probe_policy(&arguments[1..], &shape) {
+                eprintln!("probe failed: {error}");
                 std::process::exit(2);
             }
             return;
@@ -75,6 +90,51 @@ fn main() {
             _ => println!("{{\"error\":\"invalid command\"}}"),
         }
     }
+}
+
+/// Extracts `--arch a,b,c` (or `--arch=a,b,c`) from the command line.
+///
+/// The architecture is a launch-time property of the process, so it never has
+/// to travel inside a job line. Omitting it selects the single-layer policy.
+fn take_shape(arguments: &[String]) -> Result<(Vec<usize>, Vec<String>), String> {
+    let mut shape = vec![game::POLICY_INPUTS, game::POLICY_OUTPUTS];
+    let mut remaining = Vec::with_capacity(arguments.len());
+    let mut index = 0;
+    while index < arguments.len() {
+        let current = &arguments[index];
+        let value = if let Some(inline) = current.strip_prefix("--arch=") {
+            Some(inline.to_string())
+        } else if current == "--arch" {
+            index += 1;
+            Some(
+                arguments
+                    .get(index)
+                    .cloned()
+                    .ok_or("--arch needs a shape such as 64,16,8,10")?,
+            )
+        } else {
+            None
+        };
+        match value {
+            Some(text) => {
+                let widths = text
+                    .split(',')
+                    .map(|item| {
+                        item.trim()
+                            .parse::<usize>()
+                            .map_err(|error| format!("invalid layer width: {error}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if widths.len() < 2 {
+                    return Err("a shape needs at least an input and an output layer".into());
+                }
+                shape = widths;
+            }
+            None => remaining.push(current.clone()),
+        }
+        index += 1;
+    }
+    Ok((shape, remaining))
 }
 
 #[derive(Clone, Copy)]
@@ -215,7 +275,7 @@ fn parse_cli_params(arguments: &[String]) -> Result<EpisodeParams, String> {
     })
 }
 
-fn parse_job(line: &str) -> Result<(EpisodeParams, Vec<f32>), String> {
+fn parse_job(line: &str, shape: &[usize]) -> Result<(EpisodeParams, game::Policy), String> {
     let fields = line.split(',').collect::<Vec<_>>();
     if fields.len() < 18 {
         return Err(format!("expected at least 18 fields, got {}", fields.len()));
@@ -258,12 +318,7 @@ fn parse_job(line: &str) -> Result<(EpisodeParams, Vec<f32>), String> {
                 .map_err(|error| format!("invalid weight: {error}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if weights.len() != 430 {
-        return Err(format!(
-            "expected 430 policy weights, got {}",
-            weights.len()
-        ));
-    }
+    let policy = game::Policy::new(shape, weights)?;
     Ok((
         EpisodeParams {
             start_level,
@@ -273,7 +328,7 @@ fn parse_job(line: &str) -> Result<(EpisodeParams, Vec<f32>), String> {
             max_levels,
             fitness,
         },
-        weights,
+        policy,
     ))
 }
 
@@ -282,7 +337,7 @@ fn parse_job(line: &str) -> Result<(EpisodeParams, Vec<f32>), String> {
 fn run_episode(
     game: &mut game::Game,
     params: &EpisodeParams,
-    weights: &[f32],
+    policy: &game::Policy,
     profiling: bool,
 ) -> EpisodeResult {
     let total_start = Instant::now();
@@ -308,7 +363,7 @@ fn run_episode(
         killcount_ns += scan_start.elapsed().as_nanos() as u64;
         let previous_level = game.level_index;
         let policy_start = Instant::now();
-        let action = game.agent_policy_action(weights);
+        let action = game.agent_policy_action(policy);
         policy_ns += policy_start.elapsed().as_nanos() as u64;
         let sim_start = Instant::now();
         game.agent_step(
@@ -400,40 +455,39 @@ fn run_episode(
     }
 }
 
-fn evaluate_episode(
-    arguments: &[String],
-    main_start: Instant,
-    levels_elapsed: Duration,
-    profiling: bool,
-) -> Result<(), String> {
-    let params = parse_cli_params(arguments)?;
-
+fn read_stdin_weights() -> Result<Vec<f32>, String> {
     let mut input = String::new();
     io::stdin()
         .read_to_string(&mut input)
         .map_err(|error| format!("could not read policy weights: {error}"))?;
-    let weights = input
+    input
         .split(',')
+        .filter(|value| !value.trim().is_empty())
         .map(|value| {
             value
                 .trim()
                 .parse::<f32>()
                 .map_err(|error| error.to_string())
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    if weights.len() != 430 {
-        return Err(format!(
-            "expected 430 policy weights, got {}",
-            weights.len()
-        ));
-    }
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn evaluate_episode(
+    arguments: &[String],
+    shape: &[usize],
+    main_start: Instant,
+    levels_elapsed: Duration,
+    profiling: bool,
+) -> Result<(), String> {
+    let params = parse_cli_params(arguments)?;
+    let policy = game::Policy::new(shape, read_stdin_weights()?)?;
 
     let mut game = game::Game::new();
     game.set_headless();
     if profiling {
         game.enable_profiling();
     }
-    let result = run_episode(&mut game, &params, &weights, profiling);
+    let result = run_episode(&mut game, &params, &policy, profiling);
     println!(
         "{},{},{},{},{:.2},{}",
         result.score, result.levels, result.kills, result.health, result.seconds,
@@ -448,7 +502,7 @@ fn evaluate_episode(
     Ok(())
 }
 
-fn evaluate_server(profiling: bool) -> Result<(), String> {
+fn evaluate_server(shape: &[usize], profiling: bool) -> Result<(), String> {
     let mut game = game::Game::new();
     game.set_headless();
     if profiling {
@@ -461,14 +515,14 @@ fn evaluate_server(profiling: bool) -> Result<(), String> {
             continue;
         }
         let job_start = Instant::now();
-        let (params, weights) = match parse_job(&line) {
+        let (params, policy) = match parse_job(&line, shape) {
             Ok(job) => job,
             Err(error) => {
                 println!("{{\"error\":\"{}\"}}", error.replace('"', "'"));
                 continue;
             }
         };
-        let result = run_episode(&mut game, &params, &weights, profiling);
+        let result = run_episode(&mut game, &params, &policy, profiling);
         if let Some(profile) = result.profile {
             let mut profile = profile;
             profile.main_ns = job_start.elapsed().as_nanos() as u64;
@@ -492,5 +546,38 @@ fn evaluate_server(profiling: bool) -> Result<(), String> {
             );
         }
     }
+    Ok(())
+}
+
+/// Prints the policy inputs and outputs for the first step of an episode.
+///
+/// `training/env.py` computes the same vector in Python; comparing the two
+/// keeps the duplicated encoder and forward pass from drifting apart.
+fn probe_policy(arguments: &[String], shape: &[usize]) -> Result<(), String> {
+    let level = arguments
+        .first()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let difficulty = arguments
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "medium".to_string());
+    let policy = game::Policy::new(shape, read_stdin_weights()?)?;
+    let mut game = game::Game::new();
+    game.set_headless();
+    game.agent_start(level, &difficulty);
+    let inputs = game.agent_inputs();
+    let outputs = policy.forward(&inputs);
+    let inputs_json = inputs
+        .iter()
+        .map(|value| format!("{value:.6}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let outputs_json = outputs
+        .iter()
+        .map(|value| format!("{value:.6}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    println!("{{\"shape\":{shape:?},\"inputs\":[{inputs_json}],\"outputs\":[{outputs_json}]}}");
     Ok(())
 }

@@ -113,6 +113,34 @@ costs roughly 10% wall time. The evaluation job is self-contained and has a seed
 and policy, which leaves a clear seam for distributing evaluation jobs across
 machines later. This version only runs testers on the local machine.
 
+### Threads and CPU utilisation
+
+Each evaluation runs in its own persistent `doom_headless --evaluate-server`
+process, one per worker thread, so the simulator work is genuinely parallel. The
+trainer's own per-generation work (ranking, mutation, checkpoint writing) is
+single-threaded, and that is what limits utilisation on a many-core machine:
+adding cores shortens the evaluation phase but not the serial one. Each
+generation prints `eval busy N%`, and if the serial part exceeds 15% of the
+wall time the trainer prints a `note:` suggesting the `evaluation_episodes`
+value that would push it under 10%. Generating more episodes per genome is also
+the cheapest way to reduce fitness noise, so raising it is usually a win:
+
+```json
+"evaluation_episodes": 16,
+"population_size": 64
+```
+
+With 24 hardware threads, roughly 10x more evaluation work than serial work per
+generation is needed to keep every core busy, i.e. a few hundred episodes per
+generation. `cpu_threads` sets the worker count (`0` = every available CPU, `-1`
+= all but one); the trainer never starts more workers than there are jobs.
+
+Weights reach the evaluator as a packed f32 blob rather than formatted text, and
+the checkpoint stores the population as one base64 blob, because that work runs
+on the Python interpreter lock while the simulator processes would otherwise be
+idle. See `profile.csv` (`generation_s`, `eval_s`, `write_s`) when investigating
+a slow run.
+
 ## Interface
 
 `training/env.py` exposes `Evaluator`, the persistent `--evaluate-server` client

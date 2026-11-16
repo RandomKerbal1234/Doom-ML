@@ -156,13 +156,15 @@ concurrent.futures.ThreadPoolExecutor (N persistent worker threads)
    │  each thread owns one env.Evaluator (a long-lived --evaluate-server process)
    │  worker initialization runs a one-step warm-up episode
    ▼
-training/env.py :: Evaluator.evaluate(genome, cfg, seed)
+training/env.py :: Evaluator
+   │  each genome is packed to a little-endian f32 blob once per generation
+   │  (train.py :: weight_blob); a job is that blob plus a header line
    │  resolve_start_level(cfg, seed) -> start_level
    │    cfg.start_level = [low, high]  (1-based, inclusive)
    │      -> random.Random(seed).randrange(low - 1, high)
-   │  writes one job line to the server's stdin:
-   │      start_level,difficulty,dt,max_steps,max_levels_per_agent
-   │      + 13 fitness weights + parameter_count(shape) policy weights
+   │  writes to the server's stdin:
+   │      "b," + start_level,difficulty,dt,max_steps,max_levels_per_agent
+   │      + 13 fitness weights, then 4*parameter_count(shape) raw f32 bytes
    ▼
 doom/src/bin/doom_headless.rs :: evaluate_server() -> run_episode()
    │  one reused Game; agent_start(start_level, difficulty) resets episode state
@@ -669,12 +671,13 @@ preserve encounter order (both implementations sort stably by distance).
 - Per generation:
   1. Compute `seeds = seed + generation*evaluation_episodes + i` and the
      expected start level for each seed.
-  2. Build `population_size × evaluation_episodes` jobs, genome-major; each
-     job is `(genome, seed)` because the config lives in the worker thread.
-  3. Evaluate all jobs through one long-lived `ThreadPoolExecutor`. Each worker
-     thread owns one `env.Evaluator` (a persistent `--evaluate-server`
-     process) and runs a one-step warm-up at initialization. `pool.map`
-     preserves job order.
+  2. Pack each genome into a little-endian f32 blob **once** (`weight_blob`)
+     and build `population_size × evaluation_episodes` jobs, genome-major; each
+     job is `(blob, seed)` because the config lives in the worker thread.
+  3. Evaluate all jobs through one long-lived `ThreadPoolExecutor` capped at
+     `population_size × evaluation_episodes` workers. Each worker thread owns
+     one `env.Evaluator` (a persistent `--evaluate-server` process) and runs a
+     one-step warm-up at initialization. `pool.map` preserves job order.
   4. Verify every result's `start_level` matches the `resolve_start_level`
      expectation for its seed.
   5. Average each genome's episode results (`fitness`, `levels`, `kills`,
@@ -696,8 +699,23 @@ preserve encounter order (both implementations sort stably by distance).
      `| radius 1.23` only when the radius is above 1.0, so its presence means
      the search has gone flat and is deliberately taking larger steps; it
      affects the offspring built *after* that generation, not the one printed.
- 10. Append a metrics row and flush; overwrite the checkpoint, manifest, and
-     best policy; append a `profile.csv` row.
+ 10. Append a metrics row and flush; write the checkpoint, manifest, and best
+     policy **on a helper thread** (`write_run_artifacts`) and join it just
+     before the next generation writes the same files. The write overlaps the
+     next generation's evaluation, so its ~7–10 ms of serialization no longer
+     sits between two evaluation phases; `write_s` in `profile.csv` records how
+     long the write itself took (mostly overlapped), while `generation_s`
+     excludes it.
+- The generation line reports `eval busy N%`: summed episode latency divided by
+  (`eval_s × workers`), i.e. how much of the evaluation window the evaluators
+  were actually occupied. Once per run the trainer also prints a `note:` line
+  if more than 15% of a generation is single-threaded work (ranking, mutation,
+  artifact writes), with the `evaluation_episodes` value that would push that
+  floor under 10%. That ratio, not the code, is what caps utilisation on a
+  machine with many cores: the serial floor per generation is ~7 ms on an
+  M1 Pro (`evolve_s` ≈ 6 ms of it is the per-gene mutation loop, which cannot
+  move off the critical path without changing the RNG stream), so 24 threads
+  need roughly 10× that much evaluation work per generation to stay above 90%.
 - Profiling is opt-in via `DOOM_PROFILE=1`. `profile.csv` and
   `profile_summary.json` are always written, but the Rust timing columns are
   zero unless profiling is enabled. Instrumentation costs roughly 10% wall
@@ -898,7 +916,9 @@ Provenance and resume fingerprints:
   "generation": 0,
   "evaluation_seed_offset": 0,
   "next_evaluation_seed": 2001903,
-  "population": [[/* parameter_count(shape) floats */]],
+  "population_encoding": "base64-f64-le",
+  "population_shape": [64, 1266],
+  "population_blob": "base64 of population_size*parameter_count(shape) f64 LE bytes",
   "best_result": {"fitness": 0.0, "levels": 0.0, "kills": 0.0,
                    "health": 0.0, "seconds": 0.0, "start_level": 0},
   "best_genome": [/* parameter_count(shape) floats */],
@@ -933,6 +953,18 @@ generation):
 ```
 
 - `generation` is 0-based; the GUI displays `generation + 1`.
+- The population is stored packed, not as a list of lists: `population_blob` is
+  `population_size × parameter_count(shape)` f64 values, little-endian, base64
+  encoded (`population_encoding: "base64-f64-le"`, shape in
+  `population_shape`). It is bit-exact, half the size of the JSON float array,
+  and ~20× cheaper to encode. `train.py::checkpoint_population` still accepts
+  the legacy `"population": [[...]]` layout, and `pack_floats` /
+  `unpack_floats` are the only code that touches the encoding. The checkpoint
+  JSON is written by splicing the already-encoded base64 string into the
+  document (`write_json(..., raw=...)`), because pushing ~900 KB of base64
+  through the JSON encoder costs more than the rest of the document combined.
+- `best_genome` stays a plain float list, so `best_policy.json` (and the GUI's
+  naive parser) is unchanged.
 - The GUI's naive parser reads `policy_shape` (a comma-separated string) and the
   flat `weights` array; it ignores the other keys, including `architecture`.
   Keep the flat array named exactly `weights`, and do not add a key that
@@ -960,6 +992,12 @@ run_id,generation,best_fitness,mean_fitness,levels,kills,health,seconds,start_le
 - `profile.csv` has one row per generation with wall-clock stage timings and the
   summed Rust counters (`generation_s`, `eval_s`, `episode_wall_s`,
   `startup_s`, `policy_s`, `sim_s`, `update_s`, `enemy_s`, `danger_s`, etc.).
+  `generation_s` is the serial span of the generation and excludes the
+  artifact write, which overlaps the next generation's evaluation; `write_s` is
+  how long that write took, and `generation_other_s` is anything unaccounted
+  for (row emission, the join on the previous write, blob packing).
+  `eval_s / generation_s` is the fraction of the generation that could use all
+  the cores, so it is the number to watch when tuning for utilisation.
 - `profile_summary.json` aggregates those rows into totals, per-generation
   means, and percentages of episode wall time.
 - The Rust counters are zero unless `DOOM_PROFILE=1` is set when the trainer
@@ -1048,10 +1086,15 @@ doom_headless --evaluate \
 doom_headless --evaluate-server
 ```
 
-- Reads one job per line, writes one JSON result per line. Job format:
-  `start_level,difficulty,dt,max_steps,max_levels_per_agent,` followed by the
-  13 fitness weights and then the policy weights for the process's `--arch`
-  shape.
+- Reads one job per request, writes one JSON result per line. A binary job is
+  a header line `b,start_level,difficulty,dt,max_steps,max_levels_per_agent,`
+  followed by the 13 fitness weights, then exactly `4 * parameters` raw
+  little-endian f32 bytes. A text job (no `b,` marker) appends the same weights
+  as comma-separated decimal text; text jobs remain supported for hand-written
+  debugging and produce identical results.
+- The header and the blob must be read through the same `BufReader`: the
+  server parses the line with `read_until(b'\n')` and then `read_exact`s the
+  weights when the marker is present.
 - Result: `{"score":…,"levels":…,"kills":…,"health":…,"seconds":…,
   "start_level":…}` plus `"profile"` when `DOOM_PROFILE=1`.
 - One `Game` is reused for the life of the process; `run_episode` calls
@@ -1104,14 +1147,21 @@ doom_headless --probe <start_level> <difficulty> --arch <shape>
 - `forward_policy(weights, shape, inputs)` — Python MLP forward pass.
 - `choose_action(weights, obs, state=None, shape=None)` — `observe` +
   `forward_policy` + action decoding + memory advance.
+- `weight_blob(weights)` — packs a weight vector as little-endian f32 bytes
+  (`struct.pack`), the transport format for jobs. ~9 µs per genome versus
+  ~470 µs to format the same 1266 floats as decimal text; that difference runs
+  on the trainer's thread, which is why it matters.
 - `Evaluator(executable, shape=None, profile=False)` — a persistent
   `doom_headless --evaluate-server` process used by training; it passes
-  `--arch` at spawn time. `evaluate(weights, cfg, seed)` checks the genome
-  length against the shape, computes the start level, writes one job line (five
-  run parameters + 13 fitness weights + policy weights), and reads one JSON
-  result. `warm_up(cfg)` runs a one-step episode at startup. `profile=True` (or
-  the trainer's `DOOM_PROFILE=1`) enables the Rust timers. A crashed server is
-  restarted and the episode retried once.
+  `--arch` at spawn time. `evaluate(weights, cfg, seed, blob=None)` checks the
+  genome length against the shape, computes the start level, writes one job
+  (five run parameters + 13 fitness weights + the weight blob), and reads one
+  JSON result. `request(cfg, seed, blob)`, `send(payload)`, and `receive()`
+  expose the same round trip in two halves, so a caller can queue a request
+  before blocking on the previous reply. `warm_up(cfg)` runs a one-step
+  episode at startup. `profile=True` (or the trainer's `DOOM_PROFILE=1`)
+  enables the Rust timers. A crashed server is restarted and the episode
+  retried once.
 - `evaluate(weights, executable, cfg, seed, profile=False)` — compatibility
   wrapper that opens a temporary `Evaluator`, runs one episode, and closes it.
 - The interactive `HeadlessDoomEnv` class is not used by `train.py`; it is
@@ -1315,6 +1365,30 @@ Read these before changing anything.
     runs. `profile.csv` wall-clock columns are always populated; Rust columns
     are zero without profiling.
 
+27. **Utilisation is limited by per-generation serial work, not by thread
+    count.** The evaluators are embarrassingly parallel, but each generation
+    has a single-threaded section (ranking, mutation, artifact writes) of
+    roughly 7 ms on an M1 Pro and more on older CPUs. With `W` workers the
+    evaluation window is `population_size × evaluation_episodes × episode
+    latency / W`, and utilisation cannot exceed `eval_s / generation_s`. Adding
+    cores shrinks only the first term, so a 24-thread server needs far more
+    episodes per generation than a laptop to stay near 90%. `evaluation_episodes`
+    and `population_size` are the knobs; the trainer prints `eval busy` every
+    generation and a one-off `note:` with the concrete value to try.
+    `evolve_s` (the per-gene mutation loop) is the largest remaining serial
+    term and cannot be parallelised without changing the RNG draw order, which
+    the checkpoint's `random_state` depends on.
+
+28. **Everything the trainer does per job runs on the interpreter lock.** That
+    is why weights travel as a packed f32 blob built once per genome
+    (`weight_blob`) rather than as formatted text per job, and why the
+    checkpoint population is a packed base64 blob. Formatting 1266 floats cost
+    ~470 µs of GIL time per job (≈120 ms per generation at 256 jobs), which
+    starved the evaluators far more than any simulator change would. Keep new
+    per-job Python work allocation-light for the same reason, and remember that
+    a background writer thread still holds the GIL — overlap only pays when the
+    write is cheap.
+
 ## 10. Common change recipes
 
 - **Add a level:** create `doom/src/levels/NN_xxx.lvl` with a unique code and
@@ -1430,9 +1504,32 @@ To verify the server path and the one-shot path agree:
 # Same inputs must yield the same score
 ./doom/target/release/doom_headless --evaluate 0 medium 0.05 200 2 \
   1000 100 2 20 0.25 8 0.25 1 0.5 0.5 0.25 0.1 250 --arch 64,16,8,10 < weights.txt
-# job line: start_level,difficulty,dt,max_steps,max_levels + 13 weights + policy weights
+# Text job (debugging): start_level,difficulty,dt,max_steps,max_levels
+#                       + 13 weights + policy weights as decimal text
 ./doom/target/release/doom_headless --evaluate-server --arch 64,16,8,10 < jobs.txt
+# Binary job (what training sends): one line
+#   b,start_level,difficulty,dt,max_steps,max_levels,<13 weights>\n
+# followed by 4*parameters raw little-endian f32 bytes
+python3 - <<'PY'
+import json, subprocess, sys
+sys.path.insert(0, "training")
+import env
+cfg = json.load(open("config.json"))
+shape = env.policy_shape(cfg)
+weights = [0.0] * env.parameter_count(shape)
+header = "b," + ",".join(("0", "medium", "0.05", "200", "2",
+                          *(str(cfg["fitness"][k]) for k in env.FITNESS_WEIGHT_KEYS)))
+out = subprocess.run(["./doom/target/release/doom_headless", "--evaluate-server",
+                      "--arch", ",".join(map(str, shape))],
+                     input=header.encode() + b"\n" + env.weight_blob(weights),
+                     capture_output=True)
+print(out.stdout.decode().strip())
+PY
 ```
+
+Both job forms must print the same `{"score":...}` for the same weights, and a
+truncated blob must answer `could not read binary policy weights: failed to
+fill whole buffer` instead of desynchronising the stream.
 
 To verify the duplicated encoder and forward pass agree:
 

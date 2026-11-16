@@ -6,6 +6,7 @@ import json
 import math
 import os
 import random
+import struct
 import subprocess
 import time
 from pathlib import Path
@@ -308,6 +309,19 @@ def evaluate(weights, executable: Path, cfg, seed: int, profile: bool = False):
         return evaluator.evaluate(weights, cfg, seed)
 
 
+def weight_blob(weights):
+    """Pack a policy weight vector as little-endian f32 bytes.
+
+    The evaluator accepts weights as a raw blob instead of text. Formatting
+    1266 floats into a string costs ~470 us per genome and holds the GIL the
+    whole time; `struct.pack` costs ~9 us and is ~5x smaller on the wire. That
+    difference matters because this work runs in the trainer's threads while
+    the evaluator processes are otherwise idle, and every microsecond of it
+    delays a worker that is waiting to queue its next episode.
+    """
+    return struct.pack("<%df" % len(weights), *weights)
+
+
 class Evaluator:
     """A persistent `doom_headless --evaluate-server` process.
 
@@ -315,6 +329,9 @@ class Evaluator:
     expensive parts that used to run per episode -- process launch, dynamic
     linking, level parsing, and the initial game allocation -- happen once per
     worker instead.
+
+    Requests are binary: a text header line followed by a fixed-size f32 blob
+    of policy weights. Results stay on one JSON line each.
     """
 
     def __init__(self, executable: Path, shape=None, profile: bool = False):
@@ -334,16 +351,49 @@ class Evaluator:
             [str(self.executable), "--evaluate-server",
              "--arch", ",".join(map(str, self.shape))],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1, env=environment,
+            stderr=subprocess.DEVNULL, env=environment,
         )
         self.starts += 1
 
-    def _request(self, line: str):
+    def request(self, cfg, seed: int, blob: bytes, max_steps: int | None = None):
+        """Serialize one job: a header line followed by the weight blob.
+
+        Splitting this from the pipe round trip lets a worker keep a second
+        request queued in the pipe while the simulator is busy, so the
+        evaluator process never idles waiting for Python.
+        """
+        fitness = cfg["fitness"]
+        missing = [key for key in FITNESS_WEIGHT_KEYS if key not in fitness]
+        if missing:
+            raise ValueError(f"fitness configuration is missing: {', '.join(missing)}")
+        if len(blob) != 4 * self.parameters:
+            raise ValueError(
+                f"expected {4 * self.parameters} weight bytes for shape {self.shape}, "
+                f"got {len(blob)}"
+            )
+        max_levels = int(cfg.get("max_levels_per_agent", 10))
+        if max_levels < 1:
+            raise ValueError("max_levels_per_agent must be positive")
+        start_level = resolve_start_level(cfg, seed)
+        steps = cfg["max_steps"] if max_steps is None else max_steps
+        header = "b," + ",".join((
+            str(start_level), cfg["doom_difficulty"], str(cfg["time_step_seconds"]),
+            str(steps), str(max_levels),
+            *(str(fitness[key]) for key in FITNESS_WEIGHT_KEYS),
+        ))
+        return header.encode("ascii") + b"\n" + blob
+
+    def send(self, payload: bytes):
+        """Queue one job in the server's input pipe (does not wait)."""
         if self.process.poll() is not None:
             raise RuntimeError("doom_headless evaluate-server exited")
-        assert self.process.stdin and self.process.stdout
-        self.process.stdin.write(line + "\n")
+        assert self.process.stdin
+        self.process.stdin.write(payload)
         self.process.stdin.flush()
+
+    def receive(self):
+        """Read one raw result line from the server."""
+        assert self.process.stdout
         reply = self.process.stdout.readline()
         if not reply:
             raise RuntimeError("doom_headless evaluate-server closed its output")
@@ -352,36 +402,32 @@ class Evaluator:
             raise RuntimeError(result["error"])
         return result
 
-    def evaluate(self, weights, cfg, seed: int, max_steps: int | None = None):
-        fitness = cfg["fitness"]
-        missing = [key for key in FITNESS_WEIGHT_KEYS if key not in fitness]
-        if missing:
-            raise ValueError(f"fitness configuration is missing: {', '.join(missing)}")
-        if len(weights) != self.parameters:
-            raise ValueError(
-                f"expected {self.parameters} weights for shape {self.shape}, "
-                f"got {len(weights)}"
-            )
-        max_levels = int(cfg.get("max_levels_per_agent", 10))
-        if max_levels < 1:
-            raise ValueError("max_levels_per_agent must be positive")
-        start_level = resolve_start_level(cfg, seed)
-        steps = cfg["max_steps"] if max_steps is None else max_steps
-        header = ",".join((
-            str(start_level), cfg["doom_difficulty"], str(cfg["time_step_seconds"]),
-            str(steps), str(max_levels),
-            *(str(fitness[key]) for key in FITNESS_WEIGHT_KEYS),
-        ))
-        line = header + "," + ",".join(map(str, weights))
+    def restart(self):
+        self.close()
+        self._start()
+
+    def evaluate(self, weights, cfg, seed: int, max_steps: int | None = None,
+                 blob: bytes | None = None):
+        if blob is None:
+            if weights is None:
+                raise ValueError("a weight vector or a packed blob is required")
+            if len(weights) != self.parameters:
+                raise ValueError(
+                    f"expected {self.parameters} weights for shape {self.shape}, "
+                    f"got {len(weights)}"
+                )
+            blob = weight_blob(weights)
+        payload = self.request(cfg, seed, blob, max_steps)
         started = time.perf_counter()
         try:
-            result = self._request(line)
-        except (BrokenPipeError, RuntimeError, json.JSONDecodeError):
+            self.send(payload)
+            result = self.receive()
+        except (BrokenPipeError, RuntimeError, json.JSONDecodeError, OSError):
             # A crashed server is restarted and the episode retried once. This
             # is safe because every job starts from a freshly reset game.
-            self.close()
-            self._start()
-            result = self._request(line)
+            self.restart()
+            self.send(payload)
+            result = self.receive()
         wall_seconds = time.perf_counter() - started
         return {
             "fitness": float(result["score"]),

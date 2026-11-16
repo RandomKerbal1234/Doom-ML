@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead, Read, Write};
 use std::time::{Duration, Instant};
 
 const WIDTH: usize = 320;
@@ -275,8 +275,19 @@ fn parse_cli_params(arguments: &[String]) -> Result<EpisodeParams, String> {
     })
 }
 
-fn parse_job(line: &str, shape: &[usize]) -> Result<(EpisodeParams, game::Policy), String> {
-    let fields = line.split(',').collect::<Vec<_>>();
+fn parse_job(
+    line: &str,
+    shape: &[usize],
+    parameters: usize,
+    reader: &mut impl BufRead,
+) -> Result<(EpisodeParams, game::Policy), String> {
+    let mut fields = line.split(',').collect::<Vec<_>>();
+    // A leading `b` marks a binary weight blob that follows the header line.
+    // Text job lines (no marker) stay supported for hand-written debugging.
+    let binary_weights = fields.first().is_some_and(|field| *field == "b");
+    if binary_weights {
+        fields.remove(0);
+    }
     if fields.len() < 18 {
         return Err(format!("expected at least 18 fields, got {}", fields.len()));
     }
@@ -309,15 +320,19 @@ fn parse_job(line: &str, shape: &[usize]) -> Result<(EpisodeParams, game::Policy
         ammo_spent: number(16, "ammo_spent")?,
         death: number(17, "death")?,
     };
-    let weights = fields[18..]
-        .iter()
-        .map(|value| {
-            value
-                .trim()
-                .parse::<f32>()
-                .map_err(|error| format!("invalid weight: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let weights = if binary_weights {
+        read_binary_weights(reader, parameters)?
+    } else {
+        fields[18..]
+            .iter()
+            .map(|value| {
+                value
+                    .trim()
+                    .parse::<f32>()
+                    .map_err(|error| format!("invalid weight: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
     let policy = game::Policy::new(shape, weights)?;
     Ok((
         EpisodeParams {
@@ -502,23 +517,58 @@ fn evaluate_episode(
     Ok(())
 }
 
+fn read_binary_weights(reader: &mut impl BufRead, count: usize) -> Result<Vec<f32>, String> {
+    let bytes_len = count
+        .checked_mul(4)
+        .ok_or("policy weight count is too large")?;
+    let mut bytes = vec![0u8; bytes_len];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|error| format!("could not read binary policy weights: {error}"))?;
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
 fn evaluate_server(shape: &[usize], profiling: bool) -> Result<(), String> {
     let mut game = game::Game::new();
     game.set_headless();
     if profiling {
         game.enable_profiling();
     }
+    // Reading the header line and the weight blob must go through the same
+    // buffered reader, or the blob's first bytes stay stranded in the buffer.
+    let parameters = game::Policy::parameters(shape);
     let stdin = io::stdin();
-    for line in stdin.lock().lines() {
-        let line = line.map_err(|error| error.to_string())?;
-        if line.trim().is_empty() {
+    let mut reader = io::BufReader::new(stdin.lock());
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    let mut header = Vec::with_capacity(4096);
+    loop {
+        header.clear();
+        let read = reader
+            .read_until(b'\n', &mut header)
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        while matches!(header.last(), Some(b'\n') | Some(b'\r')) {
+            header.pop();
+        }
+        if header.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
         let job_start = Instant::now();
-        let (params, policy) = match parse_job(&line, shape) {
+        let parsed = match std::str::from_utf8(&header) {
+            Ok(line) => parse_job(line, shape, parameters, &mut reader),
+            Err(error) => Err(format!("job header is not valid utf-8: {error}")),
+        };
+        let (params, policy) = match parsed {
             Ok(job) => job,
             Err(error) => {
-                println!("{{\"error\":\"{}\"}}", error.replace('"', "'"));
+                writeln!(writer, "{{\"error\":\"{}\"}}", error.replace('"', "'"))
+                    .map_err(|error| error.to_string())?;
                 continue;
             }
         };
@@ -526,7 +576,8 @@ fn evaluate_server(shape: &[usize], profiling: bool) -> Result<(), String> {
         if let Some(profile) = result.profile {
             let mut profile = profile;
             profile.main_ns = job_start.elapsed().as_nanos() as u64;
-            println!(
+            writeln!(
+                writer,
                 "{{\"score\":{},\"levels\":{},\"kills\":{},\"health\":{},\"seconds\":{:.2},\
                  \"start_level\":{},\"profile\":{}}}",
                 result.score,
@@ -536,14 +587,17 @@ fn evaluate_server(shape: &[usize], profiling: bool) -> Result<(), String> {
                 result.seconds,
                 result.start_level,
                 profile.to_json(),
-            );
+            )
+            .map_err(|error| error.to_string())?;
         } else {
-            println!(
+            writeln!(
+                writer,
                 "{{\"score\":{},\"levels\":{},\"kills\":{},\"health\":{},\"seconds\":{:.2},\
                  \"start_level\":{}}}",
                 result.score, result.levels, result.kills, result.health, result.seconds,
                 result.start_level,
-            );
+            )
+            .map_err(|error| error.to_string())?;
         }
     }
     Ok(())

@@ -53,10 +53,10 @@
     "time_step_seconds": 0.05
   },
   "config_hash": "fb6a9c8f27d41395d657610cd9b5a7b5ca6d4903d0eafaf0a1be400576218872",
-  "created_at": "2026-11-16T03:03:33.728925+00:00",
+  "created_at": "2026-11-16T17:59:09.280243+00:00",
   "executable": "/Users/andrey/code/Doom-ML/doom/target/release/doom_headless",
-  "executable_sha256": "93fd092c24af0f81cff343956beb8e5d2b50fe396537cb0bdcd1dedbac90f4c2",
-  "git_commit": "1666e77b69c7b4754bbfc5993d19c80d4fc82765",
+  "executable_sha256": "7f8ecbf10bf90717afffb96d0c6cb2d9711791561ddbedf1fead8eaecec6e3b5",
+  "git_commit": "49123a21b7665b0f63ce292c514eacfca268098d",
   "git_dirty": true,
   "python_version": "3.9.6",
   "resume": {
@@ -64,9 +64,9 @@
     "enabled": false,
     "loaded_checkpoint": false
   },
-  "run_id": "642341456-fb6a9c8f27d4-20261116T030333696028Z",
+  "run_id": "642341456-fb6a9c8f27d4-20261116T175909247030Z",
   "rust_version": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
   "seed": 642341456,
   "status": "completed",
-  "updated_at": "2026-11-16T03:05:11.334208+00:00"
+  "updated_at": "2026-11-16T17:59:32.730411+00:00"
 }

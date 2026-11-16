@@ -4,15 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import array
+import base64
 import concurrent.futures
 import csv
 import hashlib
+import itertools
 import json
 import math
 import os
 import platform
 import random
+import struct
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -26,6 +31,7 @@ from env import (
     parameter_count,
     policy_shape,
     resolve_start_level,
+    weight_blob,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -290,15 +296,125 @@ def make_run_id(seed, config_hash):
     return f"{seed}-{config_hash[:12]}-{stamp}"
 
 
-def write_json(path, value, compact=False):
+def write_json(path, value, compact=False, raw=None):
+    """Write JSON, optionally splicing pre-encoded values in afterwards.
+
+    `raw` maps a key to an already-serialized JSON string. It exists for the
+    checkpoint's packed population blob: pushing that one ~900 KB base64 string
+    through `json.dumps` only makes the encoder scan it for escapes, which
+    costs more than serializing the other two hundred keys combined.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     if compact:
         text = json.dumps(value, separators=(",", ":"))
     else:
         text = json.dumps(value, indent=2, sort_keys=True)
+    if raw:
+        for key, encoded in raw.items():
+            placeholder = json.dumps(key) + (':' if compact else ': ')
+            empty = placeholder + '""'
+            if empty not in text:
+                raise SystemExit(f"placeholder for {key} is missing from {path.name}")
+            text = text.replace(empty, placeholder + encoded, 1)
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(text)
     os.replace(temporary, path)
+
+
+def write_run_artifacts(checkpoint_path, checkpoint, population, manifest_path, manifest,
+                        policy_path, policy, stats):
+    """Persist one generation's checkpoint, manifest, and policy.
+
+    Serializing that state costs ~7 ms of interpreter time and used to sit
+    between two evaluation phases while every simulator process was idle. It
+    only depends on data that is final once the next population exists, so the
+    trainer hands it to a thread and starts the next generation's evaluation
+    immediately. The file write itself releases the GIL, so the overlap costs
+    the workers almost nothing.
+    """
+    started = time.perf_counter()
+    blob = pack_floats(population)
+    write_json(checkpoint_path, checkpoint, compact=True,
+               raw={"population_blob": '"' + blob + '"'})
+    write_json(manifest_path, manifest)
+    write_json(policy_path, policy)
+    stats["write_s"] = time.perf_counter() - started
+
+
+def utilisation_note(cfg, row, workers):
+    """Diagnose a generation whose single-threaded phases dominate the clock.
+
+    Returns a one-off hint when the serial floor is large enough to matter.
+    Nothing here can be parallelised without changing the RNG stream or the
+    synchronous generation model, so the fix is to give the evaluators more
+    episodes per generation.
+    """
+    total = row["generation_s"]
+    parallel = row["eval_s"]
+    if total <= 0 or parallel <= 0:
+        return None
+    serial = max(0.0, total - parallel)
+    if serial <= 0.15 * total:
+        return None
+    episodes = max(1, cfg["evaluation_episodes"])
+    needed = math.ceil(9.0 * serial * episodes / parallel)
+    ceiling = 100.0 * parallel / total
+    note = (
+        f"note: {100 * serial / total:.0f}% of each generation runs on one thread "
+        f"(~{serial * 1e3:.1f} ms of ranking, mutation, and artifact writes) while the "
+        f"{workers} evaluators\n"
+        f"      wait, so worker utilisation tops out around {ceiling:.0f}%. "
+    )
+    if needed > episodes:
+        note += (
+            f"Raising evaluation_episodes to {needed} would put that\n"
+            f"      floor under 10% of the generation; growing population_size has "
+            f"the same effect."
+        )
+    else:
+        note += ("Giving the evaluators more episodes per generation would "
+                 "push it further down.")
+    return note
+
+
+_UTILISATION_ROWS_SEEN = 0
+_UTILISATION_NOTE_SHOWN = False
+
+
+def emit_profile_row(profiler, profile_file, profile_rows, row, cfg, workers):
+    """Record one generation's timing row (plus the opt-in human summary)."""
+    global _UTILISATION_ROWS_SEEN, _UTILISATION_NOTE_SHOWN
+    profile_rows.append(row)
+    profiler.writerow(row)
+    profile_file.flush()
+    _UTILISATION_ROWS_SEEN += 1
+    # Skip the first row: it includes one-off startup and warm-up effects.
+    if _UTILISATION_ROWS_SEEN > 1 and not _UTILISATION_NOTE_SHOWN:
+        note = utilisation_note(cfg, row, workers)
+        if note is not None:
+            _UTILISATION_NOTE_SHOWN = True
+            print(note, flush=True)
+    if PROFILE_ENABLED:
+        measured = row["episode_wall_s"] or 1.0
+        print(
+            f"  profile | gen {row['generation_s']:.2f}s "
+            f"(eval {row['eval_s']:.2f}s) | episode wall {measured:.2f}s: "
+            f"startup {row['startup_s']:.2f}s "
+            f"({100 * row['startup_s'] / measured:.1f}%), "
+            f"rust {row['rust_main_s']:.2f}s "
+            f"(policy {row['policy_s']:.2f}s, sim {row['sim_s']:.2f}s, "
+            f"killscan {row['killcount_s']:.2f}s)",
+            flush=True,
+        )
+        rust_measured = row["rust_main_s"] or 1.0
+        print(
+            f"          sim | update {row['update_s']:.2f}s "
+            f"({100 * row['update_s'] / rust_measured:.1f}% of rust: "
+            f"enemy {row['enemy_s']:.2f}s, danger {row['danger_s']:.2f}s, "
+            f"pickup {row['pickup_s']:.2f}s) | movement "
+            f"{row['movement_s']:.2f}s | fire {row['fire_s']:.2f}s",
+            flush=True,
+        )
 
 
 def git_metadata():
@@ -341,15 +457,55 @@ def expected_start_level(cfg, generation):
     return resolve_start_level(cfg, seed)
 
 
+def pack_floats(rows):
+    """Pack a matrix of floats as base64 little-endian f64.
+
+    The checkpoint rewrites the whole population every generation. Encoded as a
+    JSON array of 64x1266 floats that is ~1.75 MB and costs ~30 ms of encoding,
+    all of it while every evaluator process sits idle. The same values packed
+    with `struct` take ~1.5 ms, are half the size, and stay bit-exact, so an
+    interrupted run resumes on identical values.
+    """
+    flat = struct.pack("<%dd" % sum(len(row) for row in rows),
+                       *itertools.chain.from_iterable(rows))
+    return base64.b64encode(flat).decode("ascii")
+
+
+def unpack_floats(text, rows, columns):
+    data = array.array("d")
+    data.frombytes(base64.b64decode(text))
+    if sys.byteorder != "little":
+        data.byteswap()
+    if len(data) != rows * columns:
+        raise SystemExit(
+            f"checkpoint holds {len(data)} weights, expected {rows}x{columns}"
+        )
+    return [data[index * columns:(index + 1) * columns].tolist()
+            for index in range(rows)]
+
+
+def checkpoint_population(saved):
+    """Population from either checkpoint layout: packed blob or float lists."""
+    if "population_blob" in saved:
+        rows, columns = saved["population_shape"]
+        return unpack_floats(saved["population_blob"], int(rows), int(columns))
+    population = saved.get("population")
+    if not isinstance(population, list) or not population:
+        raise SystemExit("checkpoint population is missing")
+    return population
+
+
 def checkpoint_manifest(saved):
     required = ("run_id", "seed", "config_hash", "config", "executable_sha256",
-                "generation", "population", "random_state")
+                "generation", "random_state")
     missing = [key for key in required if key not in saved]
     if missing:
         raise SystemExit(
             "checkpoint is missing provenance metadata "
             f"({', '.join(missing)}); start a new run with --fresh"
         )
+    if "population" not in saved and "population_blob" not in saved:
+        raise SystemExit("checkpoint population is missing")
     return {
         "run_id": saved["run_id"],
         "seed": saved["seed"],
@@ -382,7 +538,7 @@ def validate_checkpoint(saved, cfg, compatibility_hash, executable_hash):
         )
     if not isinstance(saved["generation"], int) or saved["generation"] < 0:
         raise SystemExit("checkpoint generation is invalid")
-    if not isinstance(saved["population"], list) or not saved["population"]:
+    if "population" not in saved and "population_blob" not in saved:
         raise SystemExit("checkpoint population is missing")
     return metadata
 
@@ -480,11 +636,20 @@ def mutation_scales(shape, cfg):
 
 
 def mutate(parent, scales, cfg, rng, radius=1.0):
+    """Mutate one genome.
+
+    The per-gene `random()` then `gauss()` sequence is deliberately unchanged
+    from the earlier implementation: the trainer's RNG stream is part of the
+    checkpoint, so altering the draw order would silently break resume. Only
+    attribute lookups are hoisted.
+    """
     rate = cfg["mutation_rate"]
     child = parent[:]
+    draw = rng.random
+    gauss = rng.gauss
     for index, scale in enumerate(scales):
-        if rng.random() < rate:
-            child[index] += rng.gauss(0.0, scale * radius)
+        if draw() < rate:
+            child[index] += gauss(0.0, scale * radius)
     return child
 
 
@@ -518,8 +683,15 @@ def close_evaluators():
 
 
 def run_job(job):
-    genome, seed = job
-    return _WORKER.evaluator.evaluate(genome, _WORKER.cfg, seed)
+    """Run one episode. The caller passes a prebuilt weight blob.
+
+    Keeping the blob out of this function means a worker never formats floats:
+    it writes bytes, flushes, and blocks on a line of JSON. That is what lets
+    the threads overlap with the evaluator processes instead of serializing on
+    the interpreter lock.
+    """
+    blob, seed = job
+    return _WORKER.evaluator.evaluate(None, _WORKER.cfg, seed, blob=blob)
 
 
 def make_pool(executable, cfg, workers):
@@ -572,6 +744,10 @@ def main():
         cfg["resume"] = False
     cfg = validate_config(cfg)
     workers = tester_count(cfg["cpu_threads"])
+    # Every worker owns a simulator process, so more workers than episodes just
+    # pays process startup and level parsing for threads that never run a job.
+    total_jobs = cfg["population_size"] * cfg["evaluation_episodes"]
+    workers = max(1, min(workers, total_jobs))
 
     print("Effective configuration:")
     print(json.dumps(cfg, indent=2, sort_keys=True))
@@ -607,7 +783,7 @@ def main():
         checkpoint_metadata = validate_checkpoint(saved, cfg, compatibility_hash, executable_hash)
         run_id = checkpoint_metadata["run_id"]
         start_generation = saved["generation"] + 1
-        population = saved["population"]
+        population = checkpoint_population(saved)
         for genome in population:
             if len(genome) != parameters:
                 raise SystemExit(
@@ -697,6 +873,9 @@ def main():
             profiler = csv.DictWriter(profile_file, fieldnames=PROFILE_COLUMNS)
             if profile_mode == "w":
                 profiler.writeheader()
+            # (thread, launch time, profile row) of the artifact write that is
+            # currently overlapping this generation's evaluation.
+            pending_write = None
             for generation in range(start_generation, cfg["generations"]):
                 generation_start = time.perf_counter()
                 episode_count = cfg["evaluation_episodes"]
@@ -705,10 +884,19 @@ def main():
                 expected_levels = [
                     resolve_start_level(cfg, seed) for seed in seeds
                 ]
-                jobs = [(genome, seed) for genome in population for seed in seeds]
+                # Pack each genome once per generation instead of once per job.
+                # The trainer holds the GIL while packing, so doing it per job
+                # (population x episodes times) serializes the workers and
+                # leaves the evaluator processes idle.
+                blobs = [weight_blob(genome) for genome in population]
+                jobs = [(blob, seed) for blob in blobs for seed in seeds]
                 jobs_done = time.perf_counter()
                 episode_results = list(pool.map(run_job, jobs))
                 evaluation_done = time.perf_counter()
+                # Summed job latency: with `workers` threads this is the wall
+                # time they were occupied, so it doubles as the answer to "are
+                # the cores actually busy?".
+                episode_wall = sum(run["wall_seconds"] for run in episode_results)
                 for index, result in enumerate(episode_results):
                     expected_level = expected_levels[index % episode_count]
                     if result["start_level"] != expected_level:
@@ -739,10 +927,13 @@ def main():
                         )
                         stale_generations = 0
                 radius_note = "" if mutation_radius == 1.0 else f" | radius {mutation_radius:.2f}"
+                eval_span = max(evaluation_done - jobs_done, 1e-9)
+                busy = min(100.0, 100.0 * episode_wall / (eval_span * workers))
                 print(f"generation {generation + 1}/{cfg['generations']} | testers {workers} | "
                       f"best {best['fitness']:.1f} | levels {best['levels']} | "
                       f"kills {best['kills']} | hp {best['health']} | "
-                      f"{best['seconds']:.1f}s{radius_note}", flush=True)
+                      f"{best['seconds']:.1f}s | eval busy {busy:.0f}%{radius_note}",
+                      flush=True)
                 writer.writerow({"run_id": run_id, "generation": generation,
                                  "best_fitness": round(best["fitness"], 3),
                                  "mean_fitness": round(mean_fitness, 3),
@@ -774,7 +965,9 @@ def main():
                     "generation": generation,
                     "evaluation_seed_offset": generation * episode_count,
                     "next_evaluation_seed": cfg["seed"] + (generation + 1) * episode_count,
-                    "population": population,
+                    "population_encoding": "base64-f64-le",
+                    "population_shape": [len(population), parameters],
+                    "population_blob": "",
                     "best_result": best,
                     "best_genome": best_genome,
                     "mutation_radius": mutation_radius,
@@ -784,11 +977,9 @@ def main():
                     "created_at": manifest["created_at"],
                     "updated_at": utc_now(),
                 }
-                write_json(checkpoint_path, checkpoint, compact=True)
                 manifest["checkpoint_generation"] = generation
                 manifest["updated_at"] = checkpoint["updated_at"]
-                write_json(manifest_path, manifest)
-                write_json(output / cfg["best_policy_file"], {
+                policy_payload = {
                     "architecture": {
                         "inputs": INPUT_COUNT,
                         "hidden_layers": list(cfg["hidden_layers"]),
@@ -805,11 +996,31 @@ def main():
                     "doom_difficulty": cfg["doom_difficulty"],
                     "result": best,
                     "weights": best_genome,
-                })
-                writes_done = time.perf_counter()
+                }
+                # Join here, not right after launching: that is what makes the
+                # overlap work. The previous generation's artifacts are written
+                # while *this* generation's episodes run.
+                if pending_write is not None:
+                    thread, stats, pending_row = pending_write
+                    thread.join()
+                    pending_row["write_s"] = round(stats.get("write_s", 0.0), 6)
+                    emit_profile_row(profiler, profile_file, profile_rows, pending_row,
+                                     cfg, workers)
+                    pending_write = None
+                stats = {}
+                thread = threading.Thread(
+                    target=write_run_artifacts,
+                    args=(checkpoint_path, checkpoint, population, manifest_path,
+                          dict(manifest), output / cfg["best_policy_file"],
+                          policy_payload, stats),
+                    name="artifact-writer",
+                    daemon=True,
+                )
+                write_launch = time.perf_counter()
+                thread.start()
+                writes_done = write_launch
 
                 totals = profile_totals(episode_results)
-                episode_wall = sum(run["wall_seconds"] for run in episode_results)
                 rust_main = nanoseconds(totals["main_ns"])
                 row = {
                     "generation": generation,
@@ -820,13 +1031,13 @@ def main():
                     "eval_s": round(evaluation_done - jobs_done, 6),
                     "rank_s": round(ranked_done - evaluation_done, 6),
                     "evolve_s": round(evolution_done - ranked_done, 6),
-                    "write_s": round(writes_done - evolution_done, 6),
+                    # Filled in once the overlapped artifact write finishes.
+                    "write_s": 0.0,
                     "generation_other_s": round(
                         (writes_done - generation_start)
                         - (evaluation_done - jobs_done)
                         - (ranked_done - evaluation_done)
-                        - (evolution_done - ranked_done)
-                        - (writes_done - evolution_done),
+                        - (evolution_done - ranked_done),
                         6,
                     ),
                     "episode_wall_s": round(episode_wall, 6),
@@ -847,30 +1058,15 @@ def main():
                     "pickup_s": round(nanoseconds(totals["pickup_ns"]), 6),
                     "level_load_s": round(nanoseconds(totals["level_load_ns"]), 6),
                 }
-                profile_rows.append(row)
-                profiler.writerow(row)
-                profile_file.flush()
-                if PROFILE_ENABLED:
-                    measured = row["episode_wall_s"] or 1.0
-                    print(
-                        f"  profile | gen {row['generation_s']:.2f}s "
-                        f"(eval {row['eval_s']:.2f}s) | episode wall {measured:.2f}s: "
-                        f"startup {row['startup_s']:.2f}s "
-                        f"({100 * row['startup_s'] / measured:.1f}%), "
-                        f"rust {row['rust_main_s']:.2f}s "
-                        f"(policy {row['policy_s']:.2f}s, sim {row['sim_s']:.2f}s, "
-                        f"killscan {row['killcount_s']:.2f}s)",
-                        flush=True,
-                    )
-                    rust_measured = row["rust_main_s"] or 1.0
-                    print(
-                        f"          sim | update {row['update_s']:.2f}s "
-                        f"({100 * row['update_s'] / rust_measured:.1f}% of rust: "
-                        f"enemy {row['enemy_s']:.2f}s, danger {row['danger_s']:.2f}s, "
-                        f"pickup {row['pickup_s']:.2f}s) | movement "
-                        f"{row['movement_s']:.2f}s | fire {row['fire_s']:.2f}s",
-                        flush=True,
-                    )
+                pending_write = (thread, stats, row)
+            # The last generation's write is still in flight.
+            if pending_write is not None:
+                thread, stats, pending_row = pending_write
+                thread.join()
+                pending_row["write_s"] = round(stats.get("write_s", 0.0), 6)
+                emit_profile_row(profiler, profile_file, profile_rows, pending_row,
+                                 cfg, workers)
+                pending_write = None
     finally:
         pool.shutdown(wait=True)
         close_evaluators()

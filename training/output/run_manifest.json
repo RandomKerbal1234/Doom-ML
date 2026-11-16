@@ -1,6 +1,6 @@
 {
-  "checkpoint_generation": 499,
-  "compatibility_hash": "7e137576f345c207129a72765b77c87ce1e7e088da2ec4e8f87961198b1f103c",
+  "checkpoint_generation": 5999,
+  "compatibility_hash": "0b033277e8dc2d35e3d79613e153b0e914948d05f7b86ff1e1129c70ee1a3b19",
   "config": {
     "best_policy_file": "best_policy.json",
     "campaign_levels": 50,
@@ -18,13 +18,13 @@
       "death": 250.0,
       "exit_progress": 0.1,
       "health_gain": 0.5,
-      "health_per_point": 2.0,
-      "kill": 20.0,
-      "level_completion": 1000.0,
+      "health_per_point": 3.0,
+      "kill": 30.0,
+      "level_completion": 1500.0,
       "partial_level": 100.0,
       "seconds": 0.5
     },
-    "generations": 500,
+    "generations": 6000,
     "initial_weight_sigma": 0.35,
     "manifest_file": "run_manifest.json",
     "max_levels_per_agent": 50,
@@ -37,29 +37,29 @@
     "population_size": 64,
     "profile_file": "profile.csv",
     "profile_summary_file": "profile_summary.json",
-    "resume": false,
-    "seed": 641231456,
+    "resume": true,
+    "seed": 64129956,
     "start_level": [
       1,
-      5
+      6
     ],
     "time_step_seconds": 0.05
   },
-  "config_hash": "bd64e0954afbdc04498b15abb0546c0b24edd07d0b745e1c2e195e7393358770",
-  "created_at": "2026-11-16T00:24:54.680645+00:00",
-  "executable": "/Users/andrey/code/Doom-ML/doom/target/release/doom_headless",
-  "executable_sha256": "d49f15a0d7e6f887e2d5a00577014b10413f1cad10c348db1eaf3873c9746fbb",
-  "git_commit": "bc462ffa69111a6d6225ec1fb8f8979e2d186d95",
+  "config_hash": "d46b552e5fb0463e42e4605154460785d694f19af8bc8a1c7f9fc2c395587ba4",
+  "created_at": "2026-11-16T00:31:00.978623+00:00",
+  "executable": "/home/ml/Doom-ML/doom/target/release/doom_headless",
+  "executable_sha256": "e25e103f014f6427ba6a63c42a2bddbd181432522a6845bf0c07243a02446dda",
+  "git_commit": "6b5aa145bdc7a7157c2ea30e7826131f6e383895",
   "git_dirty": true,
-  "python_version": "3.9.6",
+  "python_version": "3.15.2",
   "resume": {
-    "checkpoint_generation": null,
-    "enabled": false,
-    "loaded_checkpoint": false
+    "checkpoint_generation": 1999,
+    "enabled": true,
+    "loaded_checkpoint": true
   },
-  "run_id": "641231456-bd64e0954afb-20261116T002454668988Z",
-  "rust_version": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-  "seed": 641231456,
+  "run_id": "64129956-da6dbe6ba404-20261116T003100967032Z",
+  "rust_version": "rustc 1.99.1 (58cf8f9c3 2026-10-13) (Fedora 1.99.1-2.fc45)",
+  "seed": 64129956,
   "status": "completed",
-  "updated_at": "2026-11-16T00:25:19.761394+00:00"
+  "updated_at": "2026-11-16T00:51:37.933204+00:00"
 }

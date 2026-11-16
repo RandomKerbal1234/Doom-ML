@@ -31,7 +31,10 @@ standard deviation of a neuron's *pre-activation*, so each layer is scaled by
 `mutation_sigma` is normalized the same way. When the best fitness stops
 improving for `mutation_adapt_patience` generations the mutation radius grows by
 `mutation_adapt_growth` (up to `mutation_adapt_max`) to escape a local optimum,
-and resets on any improvement.
+and resets on any improvement. The radius is a multiplier on every mutation
+step size (not on `mutation_rate`); generation lines show it as `| radius 1.23`
+only while it is above 1.0, and it applies to the offspring built after that
+generation.
 
 ## Build and run
 

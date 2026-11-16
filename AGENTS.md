@@ -692,7 +692,10 @@ preserve encounter order (both implementations sort stably by distance).
      without improvement the radius is multiplied by `mutation_adapt_growth`
      (capped at `mutation_adapt_max`) to escape a local optimum, and it resets
      on any improvement. The radius, the best-ever fitness, and the stale
-     counter are stored in the checkpoint.
+     counter are stored in the checkpoint. The generation line appends
+     `| radius 1.23` only when the radius is above 1.0, so its presence means
+     the search has gone flat and is deliberately taking larger steps; it
+     affects the offspring built *after* that generation, not the one printed.
  10. Append a metrics row and flush; overwrite the checkpoint, manifest, and
      best policy; append a `profile.csv` row.
 - Profiling is opt-in via `DOOM_PROFILE=1`. `profile.csv` and
@@ -1058,6 +1061,20 @@ doom_headless --evaluate-server
   `#[path]` includes. It does not include `ui.rs`, `main.rs`, `input.rs`, or
   `render.rs`, never opens a window, and never calls `render()`.
 
+**Probe mode** (parity check for the duplicated encoder and forward pass):
+
+```sh
+doom_headless --probe <start_level> <difficulty> --arch <shape>
+```
+
+- Reads policy weights from stdin in the same comma-separated form as
+  `--evaluate`, calls `agent_start`, then prints one JSON line:
+  `{"shape":[…],"inputs":[…],"outputs":[…]}`.
+- Inputs and outputs are formatted to six decimals. It is the Rust half of the
+  §11 parity check; Python computes the same vector with `env.observe` +
+  `env.forward_policy`. Agreement should be at f32 rounding (~5e-7).
+- It never runs an episode and never writes a score.
+
 ### 7.8 Python files
 
 `training/env.py`:
@@ -1095,8 +1112,8 @@ doom_headless --evaluate-server
   result. `warm_up(cfg)` runs a one-step episode at startup. `profile=True` (or
   the trainer's `DOOM_PROFILE=1`) enables the Rust timers. A crashed server is
   restarted and the episode retried once.
-- `evaluate(weights, executable, cfg, seed)` — compatibility wrapper that opens
-  a temporary `Evaluator`, runs one episode, and closes it.
+- `evaluate(weights, executable, cfg, seed, profile=False)` — compatibility
+  wrapper that opens a temporary `Evaluator`, runs one episode, and closes it.
 - The interactive `HeadlessDoomEnv` class is not used by `train.py`; it is
   useful for debugging or writing new trainers.
 

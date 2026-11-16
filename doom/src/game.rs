@@ -1,9 +1,21 @@
 use crate::levels::{
-    Level, MAP_HEIGHT, MAP_WIDTH, PickupKind, has_line_of_sight, level_tile, levels, tile_is_wall,
+    Level, MAP_HEIGHT, MAP_WIDTH, PickupKind, level_tile, levels,
 };
-use crate::settings::{DifficultyPreset, GameSettings, SettingKey, settings_for_category};
+use crate::settings::{DifficultyPreset, GameSettings, SettingKey};
 use crate::{HEIGHT, WIDTH};
-use macroquad::prelude::*;
+use std::time::Instant;
+
+/// Accumulated timings for the headless trainer. Every value is nanoseconds.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct GameProfile {
+    pub(crate) level_load_ns: u64,
+    pub(crate) movement_ns: u64,
+    pub(crate) fire_ns: u64,
+    pub(crate) update_ns: u64,
+    pub(crate) enemy_ns: u64,
+    pub(crate) danger_ns: u64,
+    pub(crate) pickup_ns: u64,
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct Enemy {
@@ -85,13 +97,31 @@ pub(crate) struct Game {
     pub(crate) muzzle_timer: f32,
     pub(crate) muzzle_weapon: usize,
     pub(crate) damage_flash: f32,
+    #[allow(dead_code)] // Read by the headless evaluator's reward terms.
+    pub(crate) damage_dealt: f32,
+    #[allow(dead_code)] // Read by the headless evaluator's reward terms.
+    pub(crate) damage_taken: i32,
+    #[allow(dead_code)] // Read by the headless evaluator's reward terms.
+    pub(crate) armor_damage_taken: i32,
+    #[allow(dead_code)] // Read by the headless evaluator's reward terms.
+    pub(crate) health_gain: i32,
+    #[allow(dead_code)] // Read by the headless evaluator's reward terms.
+    pub(crate) armor_gain: i32,
+    #[allow(dead_code)] // Read by the headless evaluator's reward terms.
+    pub(crate) ammo_spent: i32,
     pub(crate) danger: bool,
     pub(crate) danger_angle: f32,
     pub(crate) message: String,
     pub(crate) message_timer: f32,
     pub(crate) time: f32,
+    pub(crate) kills: u64,
+    pub(crate) profiling: bool,
+    pub(crate) profile: GameProfile,
+    pub(crate) track_danger: bool,
+    pub(crate) visual_effects: bool,
     pub(crate) pixels: Vec<u8>,
     pub(crate) z_buffer: [f32; WIDTH],
+    pub(crate) wall_grid: [bool; MAP_WIDTH * MAP_HEIGHT],
 }
 
 impl Game {
@@ -125,24 +155,60 @@ impl Game {
             muzzle_timer: 0.0,
             muzzle_weapon: 0,
             damage_flash: 0.0,
+            damage_dealt: 0.0,
+            damage_taken: 0,
+            armor_damage_taken: 0,
+            health_gain: 0,
+            armor_gain: 0,
+            ammo_spent: 0,
             danger: false,
             danger_angle: 0.0,
             message: String::new(),
             message_timer: 0.0,
             time: 0.0,
+            kills: 0,
+            profiling: false,
+            profile: GameProfile::default(),
+            track_danger: true,
+            visual_effects: true,
             pixels: vec![0; WIDTH * HEIGHT * 4],
             z_buffer: [0.0; WIDTH],
+            wall_grid: [true; MAP_WIDTH * MAP_HEIGHT],
         };
         game.ammo[0] = game.settings.starting_pistol_ammo.round() as i32;
         game.load_level(0);
         game
     }
 
-    fn load_level(&mut self, index: usize) {
+    /// Turns on nanosecond timers around the simulation phases used by training.
+    #[allow(dead_code)] // Used by the headless training binary.
+    pub(crate) fn enable_profiling(&mut self) {
+        self.profiling = true;
+    }
+
+    /// Disables work that only affects the windowed presentation.
+    #[allow(dead_code)] // Used by the headless training binary.
+    pub(crate) fn set_headless(&mut self) {
+        self.track_danger = false;
+        self.visual_effects = false;
+    }
+
+    pub(crate) fn load_level(&mut self, index: usize) {
+        let profile_start = if self.profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
         self.level_index = index;
         self.selected_level = index;
         self.danger = false;
         let level = &levels()[index];
+        self.wall_grid.fill(false);
+        for (y, row) in level.map.iter().enumerate() {
+            for (x, tile) in row.bytes().enumerate() {
+                self.wall_grid[y * MAP_WIDTH + x] = matches!(tile, b'#' | b'B' | b'M');
+            }
+        }
         self.x = level.spawn.0;
         self.y = level.spawn.1;
         self.angle = level.spawn.2;
@@ -170,13 +236,16 @@ impl Game {
         }));
         self.message = format!("{}  //  {}", level.code, level.title);
         self.message_timer = 3.0;
+        if let Some(start) = profile_start {
+            self.profile.level_load_ns += start.elapsed().as_nanos() as u64;
+        }
     }
 
     pub(crate) fn current_level(&self) -> &Level {
         &levels()[self.level_index]
     }
 
-    fn start_new_run(&mut self, first_level: usize) {
+    pub(crate) fn start_new_run(&mut self, first_level: usize) {
         self.health = self.settings.max_health.round() as i32;
         self.armor = 0;
         self.ammo = [self.settings.starting_pistol_ammo.round() as i32, 0, 0, 0];
@@ -187,7 +256,18 @@ impl Game {
         self.paused = false;
         self.settings_open = false;
         self.selected_level = first_level;
+        self.kills = 0;
+        self.reset_agent_stats();
         self.load_level(first_level);
+    }
+
+    fn reset_agent_stats(&mut self) {
+        self.damage_dealt = 0.0;
+        self.damage_taken = 0;
+        self.armor_damage_taken = 0;
+        self.health_gain = 0;
+        self.armor_gain = 0;
+        self.ammo_spent = 0;
     }
 
     /// Starts a fresh headless training episode at the requested level.
@@ -200,6 +280,16 @@ impl Game {
         };
         self.settings = GameSettings::preset(preset);
         self.difficulty = preset;
+        self.time = 0.0;
+        self.shot_timer = 0.0;
+        self.recoil = 0.0;
+        self.muzzle_timer = 0.0;
+        self.damage_flash = 0.0;
+        self.message_timer = 0.0;
+        self.hit_effects.clear();
+        self.danger = false;
+        self.profile = GameProfile::default();
+        self.kills = 0;
         self.start_new_run(first_level % levels().len());
     }
 
@@ -220,6 +310,11 @@ impl Game {
         if self.dead || self.won || self.paused || self.settings_open {
             return;
         }
+        let movement_start = if self.profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let dt = dt.clamp(0.0, 0.05);
         if weapon < self.unlocked.len() && self.unlocked[weapon] {
             self.weapon = weapon;
@@ -255,10 +350,29 @@ impl Game {
                 self.load_level((self.level_index + 1) % levels().len());
             }
         }
+        if let Some(start) = movement_start {
+            self.profile.movement_ns += start.elapsed().as_nanos() as u64;
+        }
+        let fire_start = if self.profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if fire && self.shot_timer <= 0.0 {
             self.fire();
         }
+        if let Some(start) = fire_start {
+            self.profile.fire_ns += start.elapsed().as_nanos() as u64;
+        }
+        let update_start = if self.profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
         self.update(dt);
+        if let Some(start) = update_start {
+            self.profile.update_ns += start.elapsed().as_nanos() as u64;
+        }
     }
 
     #[allow(dead_code)] // Used by the separate headless training binary.
@@ -334,7 +448,8 @@ impl Game {
         if weights.len() != OUTPUTS * width {
             return (0.0, 0.0, 0.0, false, false, 0, true);
         }
-        let mut values = Vec::with_capacity(INPUTS);
+        let mut values = [0.0f32; INPUTS];
+        let mut n = 0usize;
         for ray in 0..8 {
             let direction = self.angle + ray as f32 * std::f32::consts::TAU / 8.0;
             let mut distance = 0.0;
@@ -342,93 +457,117 @@ impl Game {
                 distance = k as f32 * 0.1;
                 let sx = (self.x + direction.cos() * distance) as i32;
                 let sy = (self.y + direction.sin() * distance) as i32;
-                if self.is_wall(sx, sy) || sx < 0 || sy < 0 || sx >= 16 || sy >= 12 {
+                if self.is_wall(sx, sy) {
                     break;
                 }
             }
-            values.push((distance / 8.0).min(1.0));
+            values[n] = (distance / 8.0).min(1.0);
+            n += 1;
         }
 
-        let mut enemies = self
-            .enemies
-            .iter()
-            .filter(|enemy| enemy.alive)
-            .collect::<Vec<_>>();
-        enemies.sort_by(|a, b| {
-            distance(self.x, self.y, a.x, a.y)
-                .partial_cmp(&distance(self.x, self.y, b.x, b.y))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        for i in 0..2 {
-            if let Some(enemy) = enemies.get(i) {
+        // Find the two nearest living enemies in one pass. This is equivalent
+        // to the old stable sort by distance but avoids the allocation.
+        let mut nearest: Option<(f32, usize)> = None;
+        let mut second: Option<(f32, usize)> = None;
+        for (index, enemy) in self.enemies.iter().enumerate() {
+            if !enemy.alive {
+                continue;
+            }
+            let dist = distance(self.x, self.y, enemy.x, enemy.y);
+            if nearest.is_none_or(|(best, _)| dist < best) {
+                second = nearest;
+                nearest = Some((dist, index));
+            } else if second.is_none_or(|(best, _)| dist < best) {
+                second = Some((dist, index));
+            }
+        }
+        for slot in 0..2 {
+            let found = if slot == 0 { nearest } else { second };
+            if let Some((dist, index)) = found {
+                let enemy = &self.enemies[index];
                 let dx = enemy.x - self.x;
                 let dy = enemy.y - self.y;
                 let bearing = dy.atan2(dx) - self.angle;
-                values.extend([
-                    bearing.sin(),
-                    bearing.cos(),
-                    (distance(self.x, self.y, enemy.x, enemy.y) / 12.0).min(1.0),
-                    (enemy.hp / 200.0).min(1.0),
-                    enemy.kind as f32,
-                ]);
+                values[n] = bearing.sin();
+                values[n + 1] = bearing.cos();
+                values[n + 2] = (dist / 12.0).min(1.0);
+                values[n + 3] = (enemy.hp / 200.0).min(1.0);
+                values[n + 4] = enemy.kind as f32;
             } else {
-                values.extend([0.0, 0.0, 1.0, 0.0, 0.0]);
+                values[n] = 0.0;
+                values[n + 1] = 0.0;
+                values[n + 2] = 1.0;
+                values[n + 3] = 0.0;
+                values[n + 4] = 0.0;
             }
+            n += 5;
         }
 
-        if let Some(pickup) = self
-            .pickups
-            .iter()
-            .filter(|pickup| pickup.active)
-            .min_by(|a, b| {
-                distance(self.x, self.y, a.x, a.y)
-                    .partial_cmp(&distance(self.x, self.y, b.x, b.y))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-        {
+        let mut nearest_pickup: Option<(f32, usize)> = None;
+        for (index, pickup) in self.pickups.iter().enumerate() {
+            if !pickup.active {
+                continue;
+            }
+            let dist = distance(self.x, self.y, pickup.x, pickup.y);
+            if nearest_pickup.is_none_or(|(best, _)| dist < best) {
+                nearest_pickup = Some((dist, index));
+            }
+        }
+        if let Some((dist, index)) = nearest_pickup {
+            let pickup = &self.pickups[index];
             let dx = pickup.x - self.x;
             let dy = pickup.y - self.y;
             let bearing = dy.atan2(dx) - self.angle;
-            values.extend([
-                bearing.sin(),
-                bearing.cos(),
-                (distance(self.x, self.y, pickup.x, pickup.y) / 12.0).min(1.0),
-            ]);
-            for kind in [
-                "shotgun",
-                "chaingun",
-                "rocket_launcher",
-                "medkit",
-                "armor",
-                "ammo",
-            ] {
-                values.push((pickup.kind.label() == kind) as u8 as f32);
-            }
+            values[n] = bearing.sin();
+            values[n + 1] = bearing.cos();
+            values[n + 2] = (dist / 12.0).min(1.0);
+            values[n + 3] = (pickup.kind == PickupKind::Shotgun) as u8 as f32;
+            values[n + 4] = (pickup.kind == PickupKind::Chaingun) as u8 as f32;
+            values[n + 5] = (pickup.kind == PickupKind::RocketLauncher) as u8 as f32;
+            values[n + 6] = (pickup.kind == PickupKind::Medkit) as u8 as f32;
+            values[n + 7] = (pickup.kind == PickupKind::Armor) as u8 as f32;
+            values[n + 8] = (pickup.kind == PickupKind::Ammo) as u8 as f32;
         } else {
-            values.extend([0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            values[n] = 0.0;
+            values[n + 1] = 0.0;
+            values[n + 2] = 1.0;
+            for slot in 3..9 {
+                values[n + slot] = 0.0;
+            }
         }
+        n += 9;
 
         let exit = self.current_level().exit;
         let dx = exit.0 - self.x;
         let dy = exit.1 - self.y;
         let bearing = dy.atan2(dx) - self.angle;
-        values.extend([
-            bearing.sin(),
-            bearing.cos(),
-            (distance(self.x, self.y, exit.0, exit.1) / 16.0).min(1.0),
-            self.health as f32 / 200.0,
-            self.armor as f32 / 200.0,
-        ]);
-        values.extend(self.ammo.map(|ammo| (ammo.max(0) as f32 / 100.0).min(1.0)));
-        values.extend(self.unlocked.map(|unlocked| unlocked as u8 as f32));
-        values.extend([self.weapon as f32 / 3.0, (self.time / 120.0).min(1.0)]);
+        values[n] = bearing.sin();
+        values[n + 1] = bearing.cos();
+        values[n + 2] = (distance(self.x, self.y, exit.0, exit.1) / 16.0).min(1.0);
+        values[n + 3] = self.health as f32 / 200.0;
+        values[n + 4] = self.armor as f32 / 200.0;
+        n += 5;
+
+        for ammo in self.ammo {
+            values[n] = (ammo.max(0) as f32 / 100.0).min(1.0);
+            n += 1;
+        }
+        for unlocked in self.unlocked {
+            values[n] = unlocked as u8 as f32;
+            n += 1;
+        }
+        values[n] = self.weapon as f32 / 3.0;
+        values[n + 1] = (self.time / 120.0).min(1.0);
+        n += 2;
+        debug_assert_eq!(n, INPUTS);
 
         let mut output = [0.0f32; OUTPUTS];
         for (out, value) in output.iter_mut().enumerate() {
             let start = out * width;
+            let row = &weights[start..start + INPUTS];
             let mut sum = weights[start + INPUTS];
-            for (i, input) in values.iter().enumerate() {
-                sum += weights[start + i] * input;
+            for (weight, input) in row.iter().zip(values.iter()) {
+                sum += weight * input;
             }
             *value = sum.tanh();
         }
@@ -451,7 +590,7 @@ impl Game {
         )
     }
 
-    fn toggle_settings(&mut self) {
+    pub(crate) fn toggle_settings(&mut self) {
         if self.settings_open {
             self.settings_open = false;
             self.paused = self.settings_return_paused;
@@ -461,57 +600,7 @@ impl Game {
         }
     }
 
-    fn handle_settings_input(&mut self) {
-        if is_key_pressed(KeyCode::Escape) {
-            self.toggle_settings();
-            return;
-        }
-        if is_key_pressed(KeyCode::Key1) {
-            self.apply_preset(DifficultyPreset::Easy);
-            return;
-        }
-        if is_key_pressed(KeyCode::Key2) {
-            self.apply_preset(DifficultyPreset::Medium);
-            return;
-        }
-        if is_key_pressed(KeyCode::Key3) {
-            self.apply_preset(DifficultyPreset::Hard);
-            return;
-        }
-
-        if is_key_pressed(KeyCode::Tab) || is_key_pressed(KeyCode::PageDown) {
-            self.settings_category = (self.settings_category + 1) % 4;
-            self.settings_selection = 0;
-        } else if is_key_pressed(KeyCode::PageUp) {
-            self.settings_category = (self.settings_category + 3) % 4;
-            self.settings_selection = 0;
-        }
-
-        let count = settings_for_category(self.settings_category).len();
-        if is_key_pressed(KeyCode::Down) {
-            self.settings_selection = (self.settings_selection + 1) % count;
-        }
-        if is_key_pressed(KeyCode::Up) {
-            self.settings_selection = (self.settings_selection + count - 1) % count;
-        }
-        let direction = if is_key_pressed(KeyCode::Right) {
-            1.0
-        } else if is_key_pressed(KeyCode::Left) {
-            -1.0
-        } else {
-            0.0
-        };
-        if direction != 0.0 {
-            let definition = settings_for_category(self.settings_category)[self.settings_selection];
-            let old_value = self.setting_value(definition.key);
-            let value =
-                (old_value + definition.step * direction).clamp(definition.min, definition.max);
-            self.write_setting_value(definition.key, value);
-            self.difficulty = DifficultyPreset::Custom;
-        }
-    }
-
-    fn apply_preset(&mut self, preset: DifficultyPreset) {
+    pub(crate) fn apply_preset(&mut self, preset: DifficultyPreset) {
         let next = GameSettings::preset(preset);
         let imp_scale = next.imp_health / self.settings.imp_health.max(1.0);
         let demon_scale = next.demon_health / self.settings.demon_health.max(1.0);
@@ -546,7 +635,7 @@ impl Game {
         }
     }
 
-    fn write_setting_value(&mut self, key: SettingKey, value: f32) {
+    pub(crate) fn write_setting_value(&mut self, key: SettingKey, value: f32) {
         match key {
             SettingKey::CurrentHealth => {
                 self.health = value.round().min(self.settings.max_health.round()) as i32;
@@ -594,7 +683,10 @@ impl Game {
     }
 
     pub(crate) fn is_wall(&self, x: i32, y: i32) -> bool {
-        matches!(self.map_tile(x, y), b'#' | b'B' | b'M')
+        if x < 0 || y < 0 || x >= MAP_WIDTH as i32 || y >= MAP_HEIGHT as i32 {
+            return true;
+        }
+        self.wall_grid[y as usize * MAP_WIDTH + x as usize]
     }
 
     fn can_stand(&self, x: f32, y: f32) -> bool {
@@ -605,7 +697,7 @@ impl Game {
             && !self.is_wall((x + r).floor() as i32, (y + r).floor() as i32)
     }
 
-    fn try_move(&self, x: f32, y: f32) -> (f32, f32) {
+    pub(crate) fn try_move(&self, x: f32, y: f32) -> (f32, f32) {
         let mut nx = self.x;
         let mut ny = self.y;
         if self.can_stand(x, self.y) {
@@ -617,146 +709,32 @@ impl Game {
         (nx, ny)
     }
 
-    pub(crate) fn handle_input(&mut self, dt: f32) {
-        let shift_down = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
-        if shift_down && is_key_pressed(KeyCode::P) {
-            self.toggle_settings();
-            return;
-        }
-        if self.settings_open {
-            self.handle_settings_input();
-            return;
-        }
-
-        if is_key_pressed(KeyCode::F1) {
-            if !self.dead && !self.won {
-                self.paused = !self.paused;
-            }
-        }
-
-        if self.paused {
-            if is_key_pressed(KeyCode::F10) {
-                macroquad::miniquad::window::quit();
-                return;
-            }
-            if is_key_pressed(KeyCode::Up) {
-                self.selected_level = (self.selected_level + levels().len() - 1) % levels().len();
-            }
-            if is_key_pressed(KeyCode::Down) {
-                self.selected_level = (self.selected_level + 1) % levels().len();
-            }
-            if is_key_pressed(KeyCode::Q) {
-                self.start_new_run(0);
-            } else if is_key_pressed(KeyCode::Enter) {
-                self.start_new_run(self.selected_level);
-            } else if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Space) {
-                self.paused = false;
-            }
-            return;
-        }
-
-        if self.dead || self.won {
-            if is_key_pressed(KeyCode::R) || is_key_pressed(KeyCode::Enter) {
-                self.restart();
-            }
-            return;
-        }
-
-        if is_key_pressed(KeyCode::Escape) {
-            self.paused = true;
-            return;
-        }
-
-        if is_key_pressed(KeyCode::Key1) {
-            self.choose_weapon(0);
-        }
-        if is_key_pressed(KeyCode::Key2) {
-            self.choose_weapon(1);
-        }
-        if is_key_pressed(KeyCode::Key3) {
-            self.choose_weapon(2);
-        }
-        if is_key_pressed(KeyCode::Key4) {
-            self.choose_weapon(3);
-        }
-        let (_, wheel_y) = mouse_wheel();
-        if wheel_y > 0.0 {
-            self.cycle_weapon(1);
-        }
-        if wheel_y < 0.0 {
-            self.cycle_weapon(-1);
-        }
-
-        let turn = (is_key_down(KeyCode::Right) as i8 - is_key_down(KeyCode::Left) as i8) as f32;
-        let running = shift_down;
-        let turn_speed = if running {
-            self.settings.run_turn_speed
-        } else {
-            self.settings.turn_speed
-        };
-        self.angle = (self.angle + turn * turn_speed * dt).rem_euclid(std::f32::consts::TAU);
-
-        let forward = (is_key_down(KeyCode::W) as i8 - is_key_down(KeyCode::S) as i8) as f32;
-        let strafe = (is_key_down(KeyCode::D) as i8 - is_key_down(KeyCode::A) as i8) as f32;
-        let mut vx = self.angle.cos() * forward - self.angle.sin() * strafe;
-        let mut vy = self.angle.sin() * forward + self.angle.cos() * strafe;
-        let magnitude = (vx * vx + vy * vy).sqrt();
-        if magnitude > 1.0 {
-            vx /= magnitude;
-            vy /= magnitude;
-        }
-        let speed = if running {
-            self.settings.run_speed
-        } else {
-            self.settings.walk_speed
-        };
-        let (nx, ny) = self.try_move(self.x + vx * speed * dt, self.y + vy * speed * dt);
-        self.x = nx;
-        self.y = ny;
-
-        if is_key_pressed(KeyCode::E) {
-            let exit = self.current_level().exit;
-            if distance(self.x, self.y, exit.0, exit.1) < 1.35 {
-                if self.level_index + 1 == levels().len() {
-                    self.won = true;
-                } else {
-                    self.load_level(self.level_index + 1);
-                }
-            } else {
-                self.message = "FIND THE GREEN EXIT PORTAL".to_string();
-                self.message_timer = 1.0;
-            }
-        }
-
-        if (is_key_down(KeyCode::Space)
-            || is_key_down(KeyCode::LeftControl)
-            || is_key_down(KeyCode::RightControl)
-            || is_mouse_button_down(MouseButton::Left))
-            && self.shot_timer <= 0.0
-        {
-            self.fire();
-        }
-    }
-
     pub(crate) fn update(&mut self, dt: f32) {
         if self.paused || self.settings_open || self.dead || self.won {
             return;
         }
         self.time += dt;
         self.shot_timer = (self.shot_timer - dt).max(0.0);
-        self.recoil = (self.recoil - dt * 4.0).max(0.0);
-        self.muzzle_timer = (self.muzzle_timer - dt).max(0.0);
-        for effect in &mut self.hit_effects {
-            effect.timer = (effect.timer - dt).max(0.0);
+        if self.visual_effects {
+            self.recoil = (self.recoil - dt * 4.0).max(0.0);
+            self.muzzle_timer = (self.muzzle_timer - dt).max(0.0);
+            for effect in &mut self.hit_effects {
+                effect.timer = (effect.timer - dt).max(0.0);
+            }
+            self.hit_effects.retain(|effect| effect.timer > 0.0);
+            self.damage_flash = (self.damage_flash - dt).max(0.0);
+            self.message_timer = (self.message_timer - dt).max(0.0);
         }
-        self.hit_effects.retain(|effect| effect.timer > 0.0);
-        self.damage_flash = (self.damage_flash - dt).max(0.0);
-        self.message_timer = (self.message_timer - dt).max(0.0);
 
         let mut incoming_damage = 0;
-        let level_index = self.level_index;
+        let walls = self.wall_grid;
         let player_x = self.x;
         let player_y = self.y;
+        let enemy_start = if self.profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
         for enemy in &mut self.enemies {
             if !enemy.alive {
                 continue;
@@ -775,24 +753,16 @@ impl Game {
                 let step = speed * dt / dist;
                 let nx = enemy.x + dx * step;
                 let ny = enemy.y + dy * step;
-                if !tile_is_wall(level_tile(
-                    level_index,
-                    nx.floor() as i32,
-                    enemy.y.floor() as i32,
-                )) {
+                if !wall_in(&walls, nx.floor() as i32, enemy.y.floor() as i32) {
                     enemy.x = nx;
                 }
-                if !tile_is_wall(level_tile(
-                    level_index,
-                    enemy.x.floor() as i32,
-                    ny.floor() as i32,
-                )) {
+                if !wall_in(&walls, enemy.x.floor() as i32, ny.floor() as i32) {
                     enemy.y = ny;
                 }
             }
             if dist < self.settings.attack_range
                 && enemy.attack_timer <= 0.0
-                && has_line_of_sight(level_index, player_x, player_y, enemy.x, enemy.y)
+                && line_of_sight_in(&walls, player_x, player_y, enemy.x, enemy.y)
             {
                 let damage = if enemy.kind == 0 {
                     self.settings.imp_damage
@@ -807,30 +777,48 @@ impl Game {
                 };
             }
         }
-        let mut nearest_threat: Option<(f32, f32, f32)> = None;
-        for enemy in &self.enemies {
-            if !enemy.alive {
-                continue;
+        if let Some(start) = enemy_start {
+            self.profile.enemy_ns += start.elapsed().as_nanos() as u64;
+        }
+        let danger_start = if self.profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        if self.track_danger {
+            let mut nearest_threat: Option<(f32, f32, f32)> = None;
+            for enemy in &self.enemies {
+                if !enemy.alive {
+                    continue;
+                }
+                let dist = distance(player_x, player_y, enemy.x, enemy.y);
+                if dist < self.settings.attack_range
+                    && line_of_sight_in(&walls, player_x, player_y, enemy.x, enemy.y)
+                    && nearest_threat.map_or(true, |(nearest_dist, _, _)| dist < nearest_dist)
+                {
+                    nearest_threat = Some((dist, enemy.x, enemy.y));
+                }
             }
-            let dist = distance(player_x, player_y, enemy.x, enemy.y);
-            if dist < self.settings.attack_range
-                && has_line_of_sight(level_index, player_x, player_y, enemy.x, enemy.y)
-                && nearest_threat.map_or(true, |(nearest_dist, _, _)| dist < nearest_dist)
-            {
-                nearest_threat = Some((dist, enemy.x, enemy.y));
+            if let Some((_, threat_x, threat_y)) = nearest_threat {
+                self.danger = true;
+                self.danger_angle =
+                    wrap_angle((threat_y - player_y).atan2(threat_x - player_x) - self.angle);
+            } else {
+                self.danger = false;
             }
         }
-        if let Some((_, threat_x, threat_y)) = nearest_threat {
-            self.danger = true;
-            self.danger_angle =
-                wrap_angle((threat_y - player_y).atan2(threat_x - player_x) - self.angle);
-        } else {
-            self.danger = false;
+        if let Some(start) = danger_start {
+            self.profile.danger_ns += start.elapsed().as_nanos() as u64;
         }
         if incoming_damage > 0 {
             self.take_damage(incoming_damage);
         }
 
+        let pickup_start = if self.profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
         for pickup in &mut self.pickups {
             if !pickup.active
                 || distance(self.x, self.y, pickup.x, pickup.y) > self.settings.pickup_radius
@@ -858,13 +846,17 @@ impl Game {
                     self.message = "ROCKET LAUNCHER ACQUIRED".to_string();
                 }
                 PickupKind::Medkit => {
+                    let before = self.health;
                     self.health = (self.health + self.settings.medkit_heal.round() as i32)
                         .min(self.settings.max_health.round() as i32);
+                    self.health_gain += (self.health - before).max(0);
                     self.message = "MEDIKIT +30".to_string();
                 }
                 PickupKind::Armor => {
+                    let before = self.armor;
                     self.armor = (self.armor + self.settings.armor_pickup.round() as i32)
                         .min(self.settings.max_armor.round() as i32);
+                    self.armor_gain += (self.armor - before).max(0);
                     self.message = "ARMOR +40".to_string();
                 }
                 PickupKind::Ammo => {
@@ -883,9 +875,34 @@ impl Game {
             }
             self.message_timer = 1.8;
         }
+        if let Some(start) = pickup_start {
+            self.profile.pickup_ns += start.elapsed().as_nanos() as u64;
+        }
     }
 
-    fn restart(&mut self) {
+    pub(crate) fn add_impact_effect(&mut self, x: f32, y: f32, kind: ImpactKind) {
+        const HIT_DURATIONS: [f32; 4] = [0.18, 0.28, 0.14, 0.42];
+        const IMPACT_DURATIONS: [f32; 4] = [0.14, 0.20, 0.12, 0.30];
+        if self.hit_effects.len() == self.hit_effects.capacity() {
+            self.hit_effects.remove(0);
+        }
+        let weapon = self.weapon.min(3);
+        let duration = if matches!(kind, ImpactKind::Enemy) {
+            HIT_DURATIONS[weapon]
+        } else {
+            IMPACT_DURATIONS[weapon]
+        };
+        self.hit_effects.push(HitEffect {
+            x,
+            y,
+            weapon,
+            kind,
+            timer: duration,
+            duration,
+        });
+    }
+
+    pub(crate) fn restart(&mut self) {
         self.level_index = 0;
         self.health = self.settings.max_health.round() as i32;
         self.armor = 0;
@@ -895,16 +912,17 @@ impl Game {
         self.dead = false;
         self.won = false;
         self.paused = false;
+        self.reset_agent_stats();
         self.load_level(0);
     }
 
-    fn choose_weapon(&mut self, weapon: usize) {
+    pub(crate) fn choose_weapon(&mut self, weapon: usize) {
         if weapon < self.unlocked.len() && self.unlocked[weapon] {
             self.weapon = weapon;
         }
     }
 
-    fn cycle_weapon(&mut self, direction: i32) {
+    pub(crate) fn cycle_weapon(&mut self, direction: i32) {
         for _ in 0..self.unlocked.len() {
             self.weapon = (self.weapon as i32 + direction).rem_euclid(4) as usize;
             if self.unlocked[self.weapon] {
@@ -913,7 +931,7 @@ impl Game {
         }
     }
 
-    fn fire(&mut self) {
+    pub(crate) fn fire(&mut self) {
         let (damage, range, cone, delay, ammo_cost) = match self.weapon {
             0 => (
                 self.settings.pistol_damage,
@@ -952,6 +970,7 @@ impl Game {
             return;
         }
         self.ammo[self.weapon] -= ammo_cost;
+        self.ammo_spent += ammo_cost;
         self.shot_timer = delay;
         self.recoil = 1.0;
         self.muzzle_timer = 0.12;
@@ -985,35 +1004,49 @@ impl Game {
             let hit_x = self.enemies[index].x;
             let hit_y = self.enemies[index].y;
             if self.weapon == 3 {
+                let mut dealt = 0.0;
                 for enemy in &mut self.enemies {
                     if enemy.alive
                         && distance(hit_x, hit_y, enemy.x, enemy.y)
                             < self.settings.rocket_blast_radius
                     {
+                        dealt += damage.min(enemy.hp.max(0.0));
                         enemy.hp -= damage;
                         enemy.hurt_timer = 0.18;
                         if enemy.hp <= 0.0 {
                             enemy.alive = false;
+                            self.kills += 1;
                         }
                     }
                 }
+                self.damage_dealt += dealt;
             } else {
                 let falloff = if self.weapon == 1 {
                     (1.0 - best_dist / 15.0).max(0.55)
                 } else {
                     1.0
                 };
-                let enemy = &mut self.enemies[index];
-                enemy.hp -= damage * falloff;
-                enemy.hurt_timer = 0.18;
-                if enemy.hp <= 0.0 {
-                    enemy.alive = false;
-                }
+                let applied = {
+                    let enemy = &mut self.enemies[index];
+                    let applied = (damage * falloff).min(enemy.hp.max(0.0));
+                    enemy.hp -= damage * falloff;
+                    enemy.hurt_timer = 0.18;
+                    if enemy.hp <= 0.0 {
+                        enemy.alive = false;
+                        self.kills += 1;
+                    }
+                    applied
+                };
+                self.damage_dealt += applied;
             }
-            self.add_impact_effect(hit_x, hit_y, ImpactKind::Enemy);
+            if self.visual_effects {
+                self.add_impact_effect(hit_x, hit_y, ImpactKind::Enemy);
+            }
         } else {
             let (impact_x, impact_y, kind) = self.find_shot_endpoint(range);
-            self.add_impact_effect(impact_x, impact_y, kind);
+            if self.visual_effects {
+                self.add_impact_effect(impact_x, impact_y, kind);
+            }
         }
     }
 
@@ -1078,10 +1111,14 @@ impl Game {
     }
 
     fn take_damage(&mut self, damage: i32) {
+        let health_before = self.health;
+        let armor_before = self.armor;
         let absorbed = (damage as f32 * self.settings.armor_absorption).round() as i32;
         let absorbed = absorbed.min(self.armor);
         self.armor -= absorbed;
         self.health -= damage - absorbed;
+        self.damage_taken += (health_before - self.health).max(0);
+        self.armor_damage_taken += (armor_before - self.armor).max(0);
         self.damage_flash = 0.20;
         if self.health <= 0 {
             self.health = 0;
@@ -1109,8 +1146,42 @@ impl Game {
         true
     }
 }
-fn distance(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+pub(crate) fn distance(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
     ((ax - bx) * (ax - bx) + (ay - by) * (ay - by)).sqrt()
+}
+
+fn wall_in(walls: &[bool; MAP_WIDTH * MAP_HEIGHT], x: i32, y: i32) -> bool {
+    if x < 0 || y < 0 || x >= MAP_WIDTH as i32 || y >= MAP_HEIGHT as i32 {
+        return true;
+    }
+    walls[y as usize * MAP_WIDTH + x as usize]
+}
+
+fn line_of_sight_in(
+    walls: &[bool; MAP_WIDTH * MAP_HEIGHT],
+    from_x: f32,
+    from_y: f32,
+    to_x: f32,
+    to_y: f32,
+) -> bool {
+    let dx = to_x - from_x;
+    let dy = to_y - from_y;
+    let dist = (dx * dx + dy * dy).sqrt();
+    if dist < 0.25 {
+        return true;
+    }
+    let steps = (dist * 8.0) as usize;
+    for i in 1..steps {
+        let t = i as f32 / steps as f32;
+        if wall_in(
+            walls,
+            (from_x + dx * t).floor() as i32,
+            (from_y + dy * t).floor() as i32,
+        ) {
+            return false;
+        }
+    }
+    true
 }
 
 fn wrap_angle(angle: f32) -> f32 {

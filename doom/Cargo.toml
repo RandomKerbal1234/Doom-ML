@@ -3,11 +3,16 @@ name = "doom"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["gui"]
+gui = ["dep:macroquad"]
+
 [dependencies]
-macroquad = "0.4.16"
+macroquad = { version = "0.4.16", optional = true }
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+panic = "abort"
 strip = true

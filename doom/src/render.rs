@@ -1,4 +1,4 @@
-use crate::game::{Game, HitEffect, ImpactKind, Sprite, SpriteKind};
+use crate::game::{Game, ImpactKind, Sprite, SpriteKind};
 use crate::levels::{PickupKind, levels};
 use crate::{HEIGHT, HUD_TOP, VIEW_HEIGHT, WIDTH};
 
@@ -296,28 +296,6 @@ impl Game {
                 }
             }
         }
-    }
-
-    pub(crate) fn add_impact_effect(&mut self, x: f32, y: f32, kind: ImpactKind) {
-        const HIT_DURATIONS: [f32; 4] = [0.18, 0.28, 0.14, 0.42];
-        const IMPACT_DURATIONS: [f32; 4] = [0.14, 0.20, 0.12, 0.30];
-        if self.hit_effects.len() == self.hit_effects.capacity() {
-            self.hit_effects.remove(0);
-        }
-        let weapon = self.weapon.min(3);
-        let duration = if matches!(kind, ImpactKind::Enemy) {
-            HIT_DURATIONS[weapon]
-        } else {
-            IMPACT_DURATIONS[weapon]
-        };
-        self.hit_effects.push(HitEffect {
-            x,
-            y,
-            weapon,
-            kind,
-            timer: duration,
-            duration,
-        });
     }
 
     fn render_weapon(&mut self) {

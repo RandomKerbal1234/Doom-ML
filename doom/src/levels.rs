@@ -299,10 +299,12 @@ pub(crate) fn level_tile(level_index: usize, x: i32, y: i32) -> u8 {
         .unwrap_or(b'#')
 }
 
+#[allow(dead_code)] // Retained as the reference tile/LOS implementation.
 pub(crate) fn tile_is_wall(tile: u8) -> bool {
     matches!(tile, b'#' | b'B' | b'M')
 }
 
+#[allow(dead_code)] // Retained as the reference tile/LOS implementation.
 pub(crate) fn has_line_of_sight(
     level_index: usize,
     from_x: f32,

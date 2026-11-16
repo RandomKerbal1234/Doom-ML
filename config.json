@@ -4,7 +4,7 @@
   "population_size": 64,
   "elite_count": 6,
   "parent_pool_size": 16,
-  "hidden_layers": [16, 8],
+  "hidden_layers": [32, 16, 12],
   "initial_weight_sigma": 0.8,
   "mutation_rate": 0.08,
   "mutation_sigma": 0.18,

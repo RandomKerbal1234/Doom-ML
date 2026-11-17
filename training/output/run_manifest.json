@@ -1,6 +1,6 @@
 {
-  "checkpoint_generation": 321,
-  "compatibility_hash": "acdf899a4aa3a94cee05db64a0389e5f0cce93fb52e713c24f72798d0e7aab10",
+  "checkpoint_generation": 4999,
+  "compatibility_hash": "e51e8b887f40fa69d45cc4ae34c26c4d5acb59587114933ea8c3a65e78d0c994",
   "config": {
     "best_policy_file": "best_policy.json",
     "campaign_levels": 50,
@@ -24,12 +24,13 @@
       "partial_level": 100.0,
       "seconds": 0.5
     },
-    "generations": 1000,
+    "generations": 5000,
     "hidden_layers": [
-      48,
-      32,
-      16,
-      12
+      47,
+      34,
+      25,
+      19,
+      14
     ],
     "initial_weight_sigma": 0.8,
     "manifest_file": "run_manifest.json",
@@ -47,28 +48,28 @@
     "profile_file": "profile.csv",
     "profile_summary_file": "profile_summary.json",
     "resume": true,
-    "seed": 642341456,
+    "seed": 123956789,
     "start_level": [
       1,
       8
     ],
     "time_step_seconds": 0.05
   },
-  "config_hash": "d2509a150b7c94c08c152c6d98ed797e5e7cd14ea19b0ebc254b5be61cfbc576",
-  "created_at": "2026-11-17T00:48:22.690470+00:00",
+  "config_hash": "b656c15acc6d1af0a81fa82d9e595df4ec3ade270045143a01b6a73188c63e04",
+  "created_at": "2026-11-17T03:48:41.555956+00:00",
   "executable": "/Users/andrey/code/Doom-ML/doom/target/release/doom_headless",
   "executable_sha256": "f8ef946b1415579e6fec2becd47400c937a958c5fd766198e431d700ee830297",
-  "git_commit": "c74016465a8336e2fe8fb516445e84d20d98ae8e",
+  "git_commit": "c2b5ad666657cf62e185710cf00131af1919f975",
   "git_dirty": true,
   "python_version": "3.9.6",
   "resume": {
-    "checkpoint_generation": null,
+    "checkpoint_generation": 999,
     "enabled": true,
-    "loaded_checkpoint": false
+    "loaded_checkpoint": true
   },
-  "run_id": "642341456-d2509a150b7c-20261117T004822541403Z",
+  "run_id": "123956789-428a24056726-20261117T034841386585Z",
   "rust_version": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-  "seed": 642341456,
-  "status": "running",
-  "updated_at": "2026-11-17T00:49:05.113588+00:00"
+  "seed": 123956789,
+  "status": "completed",
+  "updated_at": "2026-11-17T04:23:03.553472+00:00"
 }

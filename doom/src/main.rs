@@ -18,6 +18,8 @@ const WIDTH: usize = 320;
 const HEIGHT: usize = 200;
 const VIEW_HEIGHT: usize = 170;
 const HUD_TOP: usize = 172;
+/// Upper bound on fixed simulation steps per rendered frame in watch mode.
+const MAX_STEPS_PER_FRAME: usize = 8;
 
 use game::Game;
 use levels::initialize_levels;
@@ -35,6 +37,98 @@ fn policy_value<'a>(source: &'a str, key: &str) -> Option<&'a str> {
     let after_key = source.get(source.find(&marker)? + marker.len()..)?;
     let after_colon = after_key.get(after_key.find(':')? + 1..)?.trim_start();
     Some(after_colon)
+}
+
+/// Reads the leading number (integer or decimal) from a JSON value's text.
+fn parse_number<T: std::str::FromStr>(raw: &str) -> Option<T> {
+    let end = raw
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
+        .map(|(index, c)| index + c.len_utf8())
+        .last()
+        .unwrap_or(0);
+    raw.get(..end)?.parse().ok()
+}
+
+/// Mirrors `training/env.py::start_level_bounds`: a 1-based inclusive `[low,
+/// high]` range, the shorthand `0` (whole campaign) or `N` (pinned level).
+fn parse_level_range(source: &str, campaign: usize) -> Option<(usize, usize)> {
+    let raw = policy_value(source, "start_level")?;
+    if let Some(rest) = raw.strip_prefix('[') {
+        let inside = rest.split(']').next()?;
+        let mut parts = inside.split(',');
+        let low = parse_number::<usize>(parts.next()?.trim())?;
+        let high = parse_number::<usize>(parts.next()?.trim())?;
+        if low == 0 || high == 0 || low > high {
+            return None;
+        }
+        let high = high.min(campaign);
+        let low = low.min(high);
+        return Some((low - 1, high - 1));
+    }
+    let level = parse_number::<usize>(raw)?;
+    if level == 0 {
+        Some((0, campaign - 1))
+    } else {
+        let level = level.min(campaign);
+        Some((level - 1, level - 1))
+    }
+}
+
+/// Settings the watcher mirrors from `config.json` so a watched episode runs
+/// under the same conditions as a training episode.
+#[derive(Clone, Copy)]
+struct WatchSettings {
+    start_level_low: usize,
+    start_level_high: usize,
+    step_seconds: f32,
+    max_steps: usize,
+    max_levels: usize,
+}
+
+impl WatchSettings {
+    fn from_config(path: &Path) -> Self {
+        let campaign = levels::levels().len().max(1);
+        let mut settings = Self {
+            start_level_low: 0,
+            start_level_high: campaign - 1,
+            step_seconds: 0.05,
+            max_steps: 15000,
+            max_levels: campaign,
+        };
+        let Ok(source) = fs::read_to_string(path) else {
+            return settings;
+        };
+        if let Some((low, high)) = parse_level_range(&source, campaign) {
+            settings.start_level_low = low;
+            settings.start_level_high = high;
+        }
+        if let Some(step) = policy_value(&source, "time_step_seconds").and_then(parse_number::<f32>)
+        {
+            if step > 0.0 && step <= 0.05 {
+                settings.step_seconds = step;
+            }
+        }
+        if let Some(steps) = policy_value(&source, "max_steps").and_then(parse_number::<usize>) {
+            if steps > 0 {
+                settings.max_steps = steps;
+            }
+        }
+        if let Some(levels) =
+            policy_value(&source, "max_levels_per_agent").and_then(parse_number::<usize>)
+        {
+            if levels > 0 {
+                settings.max_levels = levels.min(campaign);
+            }
+        }
+        settings
+    }
+
+    /// Draws a start level from the configured range (0-based, inclusive).
+    fn random_start_level(&self) -> usize {
+        let span = self.start_level_high.saturating_sub(self.start_level_low) + 1;
+        self.start_level_low + macroquad::rand::gen_range(0, span)
+    }
 }
 
 fn load_agent_policy(path: &Path) -> Result<AgentPolicy, String> {
@@ -86,15 +180,8 @@ fn load_agent_policy(path: &Path) -> Result<AgentPolicy, String> {
     })
 }
 
-fn random_level() -> usize {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|time| (time.as_nanos() % levels::levels().len() as u128) as usize)
-        .unwrap_or(0)
-}
-
-fn start_agent_episode(game: &mut Game, policy: &AgentPolicy) {
-    game.agent_start(random_level(), &policy.difficulty);
+fn start_agent_episode(game: &mut Game, policy: &AgentPolicy, watch: &WatchSettings) {
+    game.agent_start(watch.random_start_level(), &policy.difficulty);
 }
 
 fn window_conf() -> Conf {
@@ -116,25 +203,47 @@ async fn main() {
         return;
     }
     let mut game = Game::new();
-    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
-    let watch_path = if arguments.first().map(String::as_str) == Some("--watch-agent") {
-        Some(PathBuf::from(
-            arguments
-                .get(1)
-                .map(String::as_str)
-                .unwrap_or("training/output/best_policy.json"),
-        ))
-    } else {
-        None
-    };
+    // Seed before the first episode; `SystemTime` only has microsecond
+    // resolution on some platforms, which used to make the modulo pick a
+    // constant level. quad-rand mixes the whole seed.
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|time| time.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ (u64::from(std::process::id()) << 32);
+    macroquad::rand::srand(seed);
+
+    let mut watch_path: Option<PathBuf> = None;
+    let mut config_path = PathBuf::from("config.json");
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--watch-agent" => {
+                watch_path =
+                    Some(PathBuf::from(arguments.next().unwrap_or_else(|| {
+                        "training/output/best_policy.json".to_string()
+                    })));
+            }
+            "--config" => {
+                if let Some(path) = arguments.next() {
+                    config_path = PathBuf::from(path);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let watch = WatchSettings::from_config(&config_path);
     let mut policy = watch_path
         .as_ref()
         .and_then(|path| load_agent_policy(path).ok());
     if let Some(policy) = &policy {
-        start_agent_episode(&mut game, policy);
+        start_agent_episode(&mut game, policy, &watch);
     }
     let mut next_policy_check = 0.0;
     let mut completed_levels = 0usize;
+    let mut episode_steps = 0usize;
+    let mut watch_accumulator = 0.0f32;
     let mut frame = Image::empty();
     frame.width = WIDTH as u16;
     frame.height = HEIGHT as u16;
@@ -145,7 +254,8 @@ async fn main() {
 
     loop {
         let now = get_time();
-        let dt = (now - previous).clamp(0.0, 0.05) as f32;
+        let elapsed = (now - previous).clamp(0.0, 0.25) as f32;
+        let dt = elapsed.min(0.05);
         previous = now;
 
         if let Some(path) = &watch_path {
@@ -163,8 +273,10 @@ async fn main() {
                                 .as_ref()
                                 .is_some_and(|current| current.difficulty != updated.difficulty)
                         {
-                            start_agent_episode(&mut game, &updated);
+                            start_agent_episode(&mut game, &updated, &watch);
                             completed_levels = 0;
+                            episode_steps = 0;
+                            watch_accumulator = 0.0;
                         }
                         policy = Some(updated);
                     }
@@ -174,20 +286,51 @@ async fn main() {
                 macroquad::miniquad::window::quit();
             }
             if let Some(policy) = &policy {
-                if is_key_pressed(KeyCode::R)
-                    || game.dead
-                    || completed_levels >= levels::levels().len()
-                {
-                    start_agent_episode(&mut game, policy);
+                let episode_over = game.dead
+                    || completed_levels >= watch.max_levels
+                    || episode_steps >= watch.max_steps;
+                if is_key_pressed(KeyCode::R) || episode_over {
+                    start_agent_episode(&mut game, policy, &watch);
                     completed_levels = 0;
+                    episode_steps = 0;
+                    watch_accumulator = 0.0;
                 } else {
-                    let previous_level = game.level_index;
-                    let action = game.agent_policy_action(&policy.network);
-                    game.agent_step(
-                        action.0, action.1, action.2, action.3, action.4, action.5, action.6, dt,
-                    );
-                    if game.level_index != previous_level {
-                        completed_levels += 1;
+                    // Training steps the simulation at a fixed timestep and lets
+                    // the policy act once per step. Stepping at the frame rate
+                    // changes the control frequency and how fast the recurrent
+                    // memory decays, so match the trainer instead.
+                    watch_accumulator += elapsed;
+                    let mut applied = 0;
+                    while watch_accumulator >= watch.step_seconds && applied < MAX_STEPS_PER_FRAME {
+                        let previous_level = game.level_index;
+                        let action = game.agent_policy_action(&policy.network);
+                        game.agent_step(
+                            action.0,
+                            action.1,
+                            action.2,
+                            action.3,
+                            action.4,
+                            action.5,
+                            action.6,
+                            watch.step_seconds,
+                        );
+                        watch_accumulator -= watch.step_seconds;
+                        applied += 1;
+                        episode_steps += 1;
+                        if game.level_index != previous_level {
+                            completed_levels += 1;
+                        }
+                        if game.dead
+                            || completed_levels >= watch.max_levels
+                            || episode_steps >= watch.max_steps
+                        {
+                            break;
+                        }
+                    }
+                    // A long stall (window drag, breakpoint) must not trigger a
+                    // huge catch-up burst of simulation.
+                    if applied == MAX_STEPS_PER_FRAME {
+                        watch_accumulator = watch_accumulator.min(watch.step_seconds);
                     }
                 }
             }
@@ -237,7 +380,7 @@ async fn main() {
             let status = policy.as_ref().map_or_else(
                 || "WATCHING BEST AGENT  |  WAITING FOR training/output/best_policy.json  |  Q: QUIT".to_string(),
                 |active| format!("WATCHING BEST AGENT  |  GENERATION {}  |  LEVELS {}/{}  |  R: RESTART  Q: QUIT",
-                                 active.generation + 1, completed_levels, levels::levels().len()),
+                                 active.generation + 1, completed_levels, watch.max_levels),
             );
             draw_text(&status, 12.0, 20.0, 16.0, Color::new(1.0, 0.82, 0.48, 1.0));
         }
@@ -280,5 +423,69 @@ mod tests {
         let text = "{\"generation\": 1, \"weights\": [0,0,0]}";
         let path = policy_file("doom-policy-bad.json", text);
         assert!(load_agent_policy(&path).is_err());
+    }
+
+    /// Watched episodes must start inside the configured 1-based range.
+    #[test]
+    fn parses_start_level_range() {
+        let source = r#"{ "start_level": [1, 8], "campaign_levels": 50 }"#;
+        assert_eq!(parse_level_range(source, 50), Some((0, 7)));
+        assert_eq!(
+            parse_level_range(r#"{ "start_level": [3, 3] }"#, 50),
+            Some((2, 2))
+        );
+        assert_eq!(parse_level_range(r#"{ "start_level": [0, 4] }"#, 50), None);
+        assert_eq!(parse_level_range(r#"{ "start_level": [9, 4] }"#, 50), None);
+    }
+
+    #[test]
+    fn parses_start_level_shorthand() {
+        assert_eq!(
+            parse_level_range(r#"{ "start_level": 0 }"#, 50),
+            Some((0, 49))
+        );
+        assert_eq!(
+            parse_level_range(r#"{ "start_level": 7 }"#, 50),
+            Some((6, 6))
+        );
+        assert_eq!(parse_level_range(r#"{ "fitness": {} }"#, 50), None);
+    }
+
+    /// The watcher now draws from the configured range instead of `nanos %
+    /// levels`, which was always 0 on microsecond-resolution clocks.
+    #[test]
+    fn start_level_stays_in_range() {
+        let watch = WatchSettings {
+            start_level_low: 3,
+            start_level_high: 7,
+            step_seconds: 0.05,
+            max_steps: 15000,
+            max_levels: 50,
+        };
+        for _ in 0..200 {
+            let level = watch.random_start_level();
+            assert!((3..=7).contains(&level), "unexpected level {level}");
+        }
+    }
+
+    /// Watched episodes must mirror the trainer's start levels, timestep, and
+    /// episode caps from `config.json`.
+    #[test]
+    fn reads_watch_settings_from_config() {
+        initialize_levels().ok();
+        let path = policy_file(
+            "doom-watch-config.json",
+            r#"{
+              "start_level": [1, 8],
+              "time_step_seconds": 0.05,
+              "max_steps": 15000,
+              "max_levels_per_agent": 50
+            }"#,
+        );
+        let watch = WatchSettings::from_config(&path);
+        assert_eq!((watch.start_level_low, watch.start_level_high), (0, 7));
+        assert!((watch.step_seconds - 0.05).abs() < 1e-6);
+        assert_eq!(watch.max_steps, 15000);
+        assert_eq!(watch.max_levels, 50);
     }
 }

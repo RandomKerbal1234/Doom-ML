@@ -199,11 +199,11 @@ to the checkpoint, policy, and manifest.
 watch_agent.sh
    │  ensures release binary exists, then:
    ▼
-doom --watch-agent training/output/best_policy.json
+doom --watch-agent training/output/best_policy.json --config config.json
    │  polls the policy file every 0.5 s
    │  loads weights + difficulty (naive string parser, not a JSON library)
-   │  picks a random level and runs Game::agent_policy_action / agent_step
-   └── restarts on R, death, difficulty change, or 50 level transitions
+   │  picks a level from config start_level and steps at time_step_seconds
+   └── restarts on R, death, step cap, or level-transition cap
 ```
 
 ### Interactive headless API (secondary path)
@@ -247,15 +247,17 @@ transitions or on death.
   `handle_settings_input`) and is included only by `main.rs`; the headless
   binary never compiles it.
 - Frame loop:
-  1. Clamp frame `dt` to `[0, 0.05]`.
-  2. If `--watch-agent`, poll/reload the policy and drive the agent;
-     otherwise call `game.handle_input(dt)` + `game.update(dt)`.
+  1. Clamp frame `dt` to `[0, 0.05]` (`elapsed` to `[0, 0.25]` in watch mode).
+  2. If `--watch-agent`, poll/reload the policy and drive the agent at the fixed
+     timestep from `config.json`; otherwise call `game.handle_input(dt)` +
+     `game.update(dt)`.
   3. `game.render()` into the software framebuffer.
   4. Upload framebuffer to the texture; draw it letterboxed/scaled.
   5. Draw settings/pause/end overlays and, in watch mode, a status bar.
 - `--watch-agent [path]` defaults to `training/output/best_policy.json`
   (relative to the current working directory; `watch_agent.sh` changes to the
-  repo root first).
+  repo root first). An optional `--config <path>` (default `config.json`, also
+  passed by `watch_agent.sh`) supplies the watch episode settings.
 - The policy loader is a **naive string parser**, not a JSON library: it finds
   the first `"generation"`, `"doom_difficulty"`, `"policy_shape"`, and
   `"weights"` keys and parses their values. It only supports the exact file
@@ -264,14 +266,28 @@ transitions or on death.
   fields in `best_policy.json` are harmless.
 - Reload behavior: the file is polled every 0.5 s. If only weights/generation
   change, the current episode continues with new weights. If the difficulty
-  changes (or no policy was loaded before), a new random-level episode starts.
+  changes (or no policy was loaded before), a new episode starts.
   Missing or invalid policy files are silently ignored; if no valid policy has
   ever loaded, the watcher shows a
   "WAITING FOR training/output/best_policy.json" status.
-- Watch episode lifecycle: `R` restarts at a random level; death or 50 level
-  transitions also restart; `Q` quits. The status bar shows generation
-  (`generation + 1`), completed level transitions out of 50, and
-  `R: RESTART  Q: QUIT`.
+- Watch episodes mirror training conditions, because a policy evolved at one
+  start level and control rate behaves differently otherwise:
+  - the start level is drawn uniformly from `config.json`'s `start_level` range
+    (1-based `[low, high]`, or the `0` / `N` shorthands), not from all 50
+    campaign levels. The old `SystemTime::now().as_nanos() % 50` was always 0
+    on microsecond-resolution clocks, so every episode started on level 1;
+  - the simulation advances in fixed `time_step_seconds` steps (clamped to
+    `<= 0.05`) with one policy decision per step, paced by real elapsed time
+    (at most `MAX_STEPS_PER_FRAME = 8` steps per rendered frame). Stepping at
+    the raw frame `dt` changed the control frequency and the recurrent
+    ray-memory decay relative to training and made the watched agent perform
+    far worse than `metrics.csv`;
+  - an episode ends after `max_steps` steps or `max_levels_per_agent` level
+    transitions, matching the trainer, and the watcher restarts.
+- Watch episode lifecycle: `R` restarts at a level from the configured range;
+  death, the step cap, or the level-transition cap also restarts; `Q` quits.
+  The status bar shows generation (`generation + 1`), completed level
+  transitions out of `max_levels_per_agent`, and `R: RESTART  Q: QUIT`.
 - Normal GUI play (`no --watch-agent`) uses manual input and the pause/level
   selection and settings overlays.
 
@@ -1198,7 +1214,7 @@ Python 3.9+ is sufficient (the local system Python is 3.9.6).
 | `exec_mgmt.sh` | `cd doom`; `-b` = `cargo build -r --bin doom` + `cargo build -r --bin doom_headless --no-default-features`; `-r` = run `target/release/doom` if present, else `cargo run -r`; `-h`/no args = help. Must be run from repo root. |
 | `ready.sh` | `./exec_mgmt.sh -b` then `./clear_training_data.sh`; fresh training setup. Destructive. No shebang and currently mode 644: run it as `bash ready.sh` or `chmod +x ready.sh` first. |
 | `clear_training_data.sh` | `rm -rf training/output/`. Destructive. Executable, no shebang. |
-| `watch_agent.sh` | Resolves repo root from its own path, builds if `doom/target/release/doom` is missing, then `exec doom --watch-agent "${1:-training/output/best_policy.json}"` from the repo root. |
+| `watch_agent.sh` | Resolves repo root from its own path, builds if `doom/target/release/doom` is missing, then `exec doom --watch-agent "${1:-training/output/best_policy.json}" --config "${2:-<root>/config.json}"` from the repo root. |
 | `doom/run.sh` | `./target/release/doom` (run from `doom/`). |
 | `doom/DOOM.app/.../doom-launcher` | macOS wrapper: finds `doom/target/release/doom`, shows an alert if missing, runs it with output suppressed. |
 
@@ -1264,8 +1280,8 @@ Read these before changing anything.
 
 7. **Headless agents wrap the campaign forever; GUI manual play wins.**
    `agent_step` uses `(level_index + 1) % 50` and never sets `won`. The GUI
-   watcher instead restarts after 50 level transitions or death. Do not rely
-   on `won` in headless mode.
+   watcher instead restarts after `max_levels_per_agent` level transitions,
+   `max_steps`, or death. Do not rely on `won` in headless mode.
 
 8. **Level changes require a rebuild.** Levels are embedded by `build.rs`;
    the runtime never reads `.lvl` files.
@@ -1286,7 +1302,7 @@ Read these before changing anything.
 
 11. **The GUI watcher reloads weights mid-episode.** If only weights/generation
     change, the current episode continues with the new policy; difficulty
-    changes force a new random-level episode.
+    changes force a new episode at a level from the configured range.
 
 12. **Settings are not persisted.** Every launch starts at Medium. The GUI
     watcher uses the difficulty stored in `best_policy.json`, not the GUI
@@ -1430,8 +1446,11 @@ Read these before changing anything.
   the preset string from `config.json`; the GUI watcher uses the policy file's
   difficulty. Weapon stats come from `GameSettings::medium()` and are not
   changed by presets.
-- **Watch a different policy:** `./watch_agent.sh path/to/policy.json`, or
-  `./doom/target/release/doom --watch-agent path/to/policy.json`.
+- **Watch a different policy:** `./watch_agent.sh path/to/policy.json`
+  (`./watch_agent.sh path/to/policy.json path/to/config.json`), or
+  `./doom/target/release/doom --watch-agent path/to/policy.json --config path/to/config.json`.
+  Watched episodes use that config's `start_level`, `time_step_seconds`,
+  `max_steps`, and `max_levels_per_agent`.
 - **Manage runs:** set `resume` in `config.json` to continue; use `--fresh` to
   start over; use `clear_training_data.sh` (destructive) or a different
   `output_directory` for a completely clean directory. Changing

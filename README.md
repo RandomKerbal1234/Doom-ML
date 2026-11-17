@@ -20,9 +20,17 @@ The repository contains two cooperating programs:
 > repository root.
 
 Training is from scratch: no human demonstrations and no neural-network
-library. A policy is a flat list of **430 weights** (a single linear layer with
-`tanh` activation), evolved with a simple elitist mutation hill-climber in
-parallel across CPU cores.
+library. A policy is a flat list of weights for a configurable `tanh` MLP,
+evolved with a simple elitist mutation hill-climber in parallel across CPU
+cores. The current configuration uses a 64→48→32→16→12→10 network with 5,550
+weights.
+
+The **`visualizer`** app displays the network and its learned weights from the
+latest `training/output/best_policy.json`. It watches for policy updates while
+open; hover over nodes and connections to inspect them. Scroll over the network
+to zoom up to 5000%, use `W` / `A` / `S` / `D` or the arrow keys to move the
+view, or drag the network directly. Click a neuron to highlight its incoming
+and outgoing connections; click blank space to clear the selection.
 
 ---
 
@@ -55,7 +63,14 @@ python3 training/train.py
 
 # 4. Or play the game yourself
 ./exec_mgmt.sh -r
+
+# 5. Visualize the latest best-agent network
+cd visualizer && cargo run --release
 ```
+
+The visualizer defaults to `training/output/best_policy.json`; pass a policy
+JSON path to inspect another agent. See
+[`visualizer/README.md`](visualizer/README.md) for controls and details.
 
 A short smoke run (single generation):
 
@@ -90,6 +105,10 @@ doom-ml/
 ├── clear_training_data.sh      # Delete training/output/
 ├── exec_mgmt.sh                # Build / run the game (and both binaries)
 ├── watch_agent.sh              # Open the GUI and follow best_policy.json
+├── visualizer/                 # Rust GUI for exploring the best policy network
+│   ├── Cargo.toml
+│   ├── README.md
+│   └── src/main.rs
 ├── debug/                      # Historical optimization benchmark snapshot (not live code)
 ├── training/
 │   ├── train.py                # Evolution loop, checkpointing, metrics, CLI

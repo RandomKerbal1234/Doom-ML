@@ -577,6 +577,11 @@ Rules enforced by `levels.rs`:
 - 50 unique codes and 50 map layouts.
 - Episode themes/titles repeat across E2–E5 (e.g. `CINDER MAZE` appears as
   E2M3, E3M2, E4M1, E5M10) but the maps and placements differ.
+- Campaign medkits follow enemy order across the full campaign: place one for
+  each fifth enemy encountered, counting enemies in level-file order, and
+  guarantee at least one medkit in level 1. With the current 312 enemies, the
+  campaign has 63 medkits. If enemy counts or level order change, recalculate
+  the per-level placements at each cumulative fifth-enemy threshold.
 - `doom/src/levels/README.md` documents the format and says the campaign is
   ten original levels followed by 40 maze-style levels.
 - `train.py` hard-requires `campaign_levels == 50`; adding/removing levels

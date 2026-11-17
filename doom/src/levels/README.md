@@ -41,4 +41,6 @@ The map is exactly 16 columns by 12 rows. `#`, `B`, and `M` are solid wall tiles
 
 Enemy types are `imp` and `demon`. Pickup types are `shotgun`, `chaingun`, `rocket_launcher`, `medkit`, `armor`, and `ammo`. Lines beginning with `;` or `//` are comments. Keep the spawn, exit, enemies, and pickups on open tiles.
 
+Every level should contain at least one `medkit`, and levels with five or more enemies should contain at least two. The current campaign has 312 enemies and 91 medkits. If you add or change enemies, check these minimums and add medkits on reachable open tiles, preferably away from the spawn, exit, enemies, and other pickups.
+
 In the pause/help screen, use Up/Down to select a level and Enter to start it. Press Q to quickplay from the first level and continue through the campaign via the exits. Escape, Space, or F1 resumes the paused game.

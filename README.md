@@ -283,6 +283,8 @@ exit=14.5,10.5
   `rocket_launcher`, `medkit`, `armor`, `ammo`.
 - `;` and `//` start comments. Spawn, exit, enemies, and pickups must be on open
   tiles; level codes must be unique.
+- Every level has at least one medkit, and levels with five or more enemies have
+  at least two (the 50-level campaign currently has 312 enemies and 91 medkits).
 - Editing levels requires a rebuild; the game never reads these files at runtime.
 
 See [`doom/src/levels/README.md`](doom/src/levels/README.md) for the full format.

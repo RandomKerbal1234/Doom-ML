@@ -1,0 +1,73 @@
+{
+  "checkpoint_generation": 7128,
+  "compatibility_hash": "1bf6872748495752ef34f5048383328ae7f49f79241f54eac7d0fb733c216b3e",
+  "config": {
+    "best_policy_file": "best_policy.json",
+    "campaign_levels": 50,
+    "checkpoint_file": "checkpoint.json",
+    "cpu_threads": 0,
+    "doom_difficulty": "medium",
+    "elite_count": 6,
+    "evaluation_episodes": 4,
+    "fitness": {
+      "ammo_spent": 0.1,
+      "armor_damage_taken": 0.5,
+      "armor_gain": 0.25,
+      "damage_dealt": 0.25,
+      "damage_taken": 1.0,
+      "death": 250.0,
+      "exit_progress": 0.1,
+      "health_gain": 0.5,
+      "health_per_point": 2.0,
+      "kill": 20.0,
+      "level_completion": 1000.0,
+      "partial_level": 100.0,
+      "seconds": 0.5
+    },
+    "generations": 10000,
+    "hidden_layers": [
+      32,
+      16,
+      12
+    ],
+    "initial_weight_sigma": 0.8,
+    "manifest_file": "run_manifest.json",
+    "max_levels_per_agent": 50,
+    "max_steps": 15000,
+    "metrics_file": "metrics.csv",
+    "mutation_adapt_growth": 1.1,
+    "mutation_adapt_max": 3.0,
+    "mutation_adapt_patience": 25,
+    "mutation_rate": 0.08,
+    "mutation_sigma": 0.18,
+    "output_directory": "training/output",
+    "parent_pool_size": 16,
+    "population_size": 64,
+    "profile_file": "profile.csv",
+    "profile_summary_file": "profile_summary.json",
+    "resume": true,
+    "seed": 60141456,
+    "start_level": [
+      1,
+      8
+    ],
+    "time_step_seconds": 0.05
+  },
+  "config_hash": "33960f96e91f25d413994a5de1b17ba5819e2646ede4eafbce272efdd0e731aa",
+  "created_at": "2026-11-16T23:37:46.020942+00:00",
+  "executable": "/home/ml/Doom-ML/doom/target/release/doom_headless",
+  "executable_sha256": "a5bbfbcaf81641b9337d11054807dce7fe4b03737fc95d8bbfe5a7f755b19649",
+  "git_commit": "8a21a99a93dd91cb2fd0cfd350184a64be988edb",
+  "git_dirty": true,
+  "python_version": "3.15.2",
+  "resume": {
+    "checkpoint_generation": null,
+    "enabled": true,
+    "loaded_checkpoint": false
+  },
+  "run_id": "60141456-33960f96e91f-20261116T233745870818Z",
+  "rust_version": "rustc 1.99.1 (58cf8f9c3 2026-10-13) (Fedora 1.99.1-2.fc45)",
+  "seed": 60141456,
+  "status": "running",
+  "updated_at": "2026-11-17T00:13:28.112158+00:00"
+}

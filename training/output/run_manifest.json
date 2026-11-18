@@ -1,5 +1,5 @@
 {
-  "checkpoint_generation": 3482,
+  "checkpoint_generation": 19999,
   "compatibility_hash": "5c49cc3fb7289b344bddaa90ed620e0eae8cf6cdaed8796656a677fccc5111c9",
   "config": {
     "best_policy_file": "best_policy.json",
@@ -57,17 +57,17 @@
   "created_at": "2026-11-17T22:49:53.008143+00:00",
   "executable": "/home/ml/Doom-ML/doom/target/release/doom_headless",
   "executable_sha256": "a5bbfbcaf81641b9337d11054807dce7fe4b03737fc95d8bbfe5a7f755b19649",
-  "git_commit": "f8b089eb80a649ee94370865149e87419576f42f",
-  "git_dirty": true,
+  "git_commit": "fd4f0baae5fcbd997fb5e250e485e844edae0314",
+  "git_dirty": false,
   "python_version": "3.15.2",
   "resume": {
-    "checkpoint_generation": null,
+    "checkpoint_generation": 3482,
     "enabled": true,
-    "loaded_checkpoint": false
+    "loaded_checkpoint": true
   },
   "run_id": "3921111-a79ef42fe4a9-20261117T224952884237Z",
   "rust_version": "rustc 1.99.1 (58cf8f9c3 2026-10-13) (Fedora 1.99.1-2.fc45)",
   "seed": 3921111,
-  "status": "running",
-  "updated_at": "2026-11-17T23:06:17.345072+00:00"
+  "status": "completed",
+  "updated_at": "2026-11-18T00:58:04.992540+00:00"
 }

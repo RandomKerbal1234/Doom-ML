@@ -4,7 +4,11 @@
   "population_size": 64,
   "elite_count": 6,
   "parent_pool_size": 16,
-  "hidden_layers": [32,32,32],
+  "hidden_layers": [
+    32,
+    32,
+    32
+  ],
   "initial_weight_sigma": 0.8,
   "mutation_rate": 0.08,
   "mutation_sigma": 0.18,
@@ -16,9 +20,12 @@
   "max_levels_per_agent": 50,
   "evaluation_episodes": 4,
   "doom_difficulty": "medium",
-  "start_level": [1, 8],
+  "start_level": [
+    1,
+    8
+  ],
   "campaign_levels": 50,
-  "seed": 192168,
+  "seed": 192408,
   "resume": true,
   "output_directory": "training/output",
   "checkpoint_file": "checkpoint.json",

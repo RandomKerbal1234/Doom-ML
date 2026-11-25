@@ -1,0 +1,2 @@
+generation,episodes,steps,generation_s,jobs_s,eval_s,rank_s,evolve_s,write_s,generation_other_s,episode_wall_s,startup_s,rust_main_s,rust_eval_s,rust_levels_s,setup_s,policy_s,sim_s,killcount_s,loop_other_s,movement_s,fire_s,update_s,enemy_s,danger_s,pickup_s,level_load_s
+0,256,0,0.168907,0.002526,0.144087,0.000219,0.021925,0.015308,0.002676,1.012407,1.012407,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0
